@@ -75,6 +75,9 @@ if [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
 fi
 [[ $fail -eq 0 ]] || { echo "CHECK FAILED" >&2; exit 1; }
 
+# Keep Spotlight/Launchpad from opening this build copy instead of the installed app.
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$APP" 2>/dev/null || true
+
 echo
 echo "DMG: $DMG"
 echo "Size: $(du -h "$DMG" | cut -f1)"
