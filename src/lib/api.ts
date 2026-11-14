@@ -36,6 +36,9 @@ export const deleteDisk = (diskId: number) => call<void>("delete_disk", { diskId
 export const exportDisk = (diskId: number, destPath: string) => call<void>("export_disk", { diskId, destPath }, () => m.export_disk({ diskId, destPath }));
 export const importDisk = (srcPath: string) => call<Disk>("import_disk", { srcPath }, () => m.import_disk({ srcPath }));
 export const revealItem = (id: number) => call<void>("reveal_item", { id }, () => m.reveal_item({ id }));
+export const diskAccess = (mountPath: string) =>
+  call<"ok" | "needed">("disk_access", { mountPath }, () => m.disk_access({ mountPath }));
+export const openDiskAccessSettings = () => call<void>("open_disk_access_settings", undefined, () => m.open_disk_access_settings());
 export const getSettings = () => call<Settings>("get_settings", undefined, () => m.get_settings());
 export const setSettings = (settings: Settings) => call<Settings>("set_settings", { settings }, () => m.set_settings({ settings }));
 

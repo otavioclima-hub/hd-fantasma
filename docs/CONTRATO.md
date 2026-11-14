@@ -91,6 +91,8 @@ interface ReadProgress {
 | `export_disk` | `{ diskId: number, destPath: string }` | `void` |
 | `import_disk` | `{ srcPath: string }` | `Disk` |
 | `reveal_item` | `{ id: number }` | `void` (abre no Finder/Explorer se o disco estiver presente) |
+| `disk_access` | `{ mountPath: string }` | `"ok" \| "needed"` (macOS: disco interno sem Acesso Total ao Disco) |
+| `open_disk_access_settings` | — | `void` (abre Ajustes › Privacidade › Acesso Total ao Disco; página local, sem rede) |
 | `get_settings` / `set_settings` | `{ settings: { language: "pt" \| "en", includeHidden: boolean, viewMode: "columns" \| "list", showInspector: boolean } }` | settings |
 
 Erros: string legível em pt-BR (ex.: `"O disco não está plugado."`).

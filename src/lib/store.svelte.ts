@@ -60,6 +60,8 @@ export const S = $state({
     text?: string;
     value?: string;
     okLabel: string;
+    /** Third button (between Cancel and OK); answers "alt". */
+    altLabel?: string;
     danger?: boolean;
     resolve: (v: boolean | string | null) => void;
   },
@@ -77,6 +79,11 @@ const fail = (e: unknown) => toast(e instanceof Error ? e.message : String(e));
 export const askConfirm = (title: string, text: string, okLabel: string, danger = false) =>
   new Promise<boolean>((resolve) => {
     S.dialog = { kind: "confirm", title, text, okLabel, danger, resolve: (v) => resolve(v === true) };
+  });
+/** Confirm with a third choice: true (OK), "alt" or null (cancel). */
+const askChoice = (title: string, text: string, okLabel: string, altLabel: string) =>
+  new Promise<true | "alt" | null>((resolve) => {
+    S.dialog = { kind: "confirm", title, text, okLabel, altLabel, resolve: (v) => resolve(v === true ? true : v === "alt" ? "alt" : null) };
   });
 export const askText = (title: string, value: string, okLabel: string) =>
   new Promise<string | null>((resolve) => {
@@ -321,6 +328,18 @@ export async function loadMore() {
 
 // ---------- ações de disco ----------
 export async function startRead(mountPath: string, name: string, options: ReadOptions) {
+  // Internal Mac disk without Full Disk Access: macOS would ask folder by folder. Offer the
+  // one-time switch first.
+  if ((await api.diskAccess(mountPath).catch(() => "ok")) === "needed") {
+    S.sheetOpen = false;
+    const c = await askChoice(tr("access.title"), tr("access.text"), tr("access.open"), tr("access.anyway"));
+    if (c === null) return;
+    if (c === true) {
+      await api.openDiskAccessSettings().catch(fail);
+      toast(tr("access.toast"));
+      return;
+    }
+  }
   S.reading = true;
   S.readName = name;
   S.progress = null;

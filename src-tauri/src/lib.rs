@@ -185,6 +185,48 @@ fn reveal(_path: &std::path::Path) -> CmdResult<()> {
     Err("Mostrar no gerenciador de arquivos ainda não é suportado neste sistema.".into())
 }
 
+/// macOS: reading the internal disk without Full Disk Access makes the system ask for each
+/// protected folder (Desktop, Documents, other apps' data...), one prompt at a time.
+/// Returns "needed" when the disk is the internal one and that access is off; "ok" otherwise.
+#[tauri::command]
+fn disk_access(mount_path: String) -> &'static str {
+    if needs_full_disk_access(std::path::Path::new(&mount_path)) { "needed" } else { "ok" }
+}
+
+#[cfg(target_os = "macos")]
+fn needs_full_disk_access(mount: &std::path::Path) -> bool {
+    let internal = mount == std::path::Path::new("/") || mount.starts_with("/System/Volumes/Data");
+    // This folder can only be listed with Full Disk Access, and listing it never shows a prompt
+    // (only lists the folder; nothing is opened, ADR 0013).
+    internal
+        && matches!(
+            std::fs::read_dir("/Library/Application Support/com.apple.TCC"),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied
+        )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn needs_full_disk_access(_mount: &std::path::Path) -> bool {
+    false
+}
+
+/// Opens System Settings at Privacy & Security > Full Disk Access (a local system page, no network).
+#[tauri::command]
+fn open_disk_access_settings() -> CmdResult<()> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+            .status()
+            .map_err(|_| "Não foi possível abrir os Ajustes do Sistema.".to_string())
+            .and_then(|s| if s.success() { Ok(()) } else { Err("Não foi possível abrir os Ajustes do Sistema.".into()) })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(())
+    }
+}
+
 #[tauri::command]
 async fn get_settings(state: State<'_, AppState>) -> CmdResult<Settings> {
     let s = open(&state)?;
@@ -408,6 +450,8 @@ pub fn run() {
             export_disk,
             import_disk,
             reveal_item,
+            disk_access,
+            open_disk_access_settings,
             get_settings,
             set_settings,
             claude_status,

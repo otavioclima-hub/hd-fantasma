@@ -247,6 +247,8 @@ export const mock = {
     return { ...d };
   },
   async cancel_read(): Promise<void> { cancelled = true; },
+  async disk_access(a: { mountPath: string }): Promise<"ok" | "needed"> { return a.mountPath === "/" ? "needed" : "ok"; },
+  async open_disk_access_settings(): Promise<void> {},
   async list_children(a: { diskId: number; parentId: number | null }): Promise<Item[]> {
     await sleep(a.parentId == null ? 40 : 90);
     return (childMap.get(key(a.diskId, a.parentId)) ?? []).slice();
