@@ -50,6 +50,18 @@ const ROOT_SYSTEM_DIRS: &[&str] = &[
     "tmp", ".Spotlight-V100", ".fseventsd", ".DocumentRevisions-V100", ".PKInstallSandboxManager",
 ];
 
+/// Other apps' private data on the internal Mac disk (`Users/<name>/Library/Containers` and
+/// `.../Group Containers`). macOS asks "would like to access data from other apps" once per app
+/// inside them, so reading them floods the person with prompts. They hold only app internals
+/// (caches, databases), never the person's own files, so they stay out of the catalog.
+fn is_other_apps_data(rel: &str) -> bool {
+    let mut parts = rel.split('/');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some("Users"), Some(user), Some("Library"), Some("Containers" | "Group Containers"), None) if !user.is_empty()
+    )
+}
+
 fn is_ignored(name: &str) -> bool {
     name.starts_with("._") || IGNORED.iter().any(|x| x.eq_ignore_ascii_case(name))
 }
@@ -140,7 +152,7 @@ impl Shared<'_> {
     }
 
     fn skip_dir(&self, rel: &str, dev: Option<u64>) -> bool {
-        if self.is_slash && ROOT_SYSTEM_DIRS.contains(&rel) {
+        if self.is_slash && (ROOT_SYSTEM_DIRS.contains(&rel) || is_other_apps_data(rel)) {
             return true;
         }
         // Não atravessa para outro volume montado.
@@ -800,6 +812,21 @@ mod tests {
         slash.is_slash = true;
         assert!(slash.skip_dir("Volumes", Some(10)));
         assert!(!slash.skip_dir("Users", Some(10)));
+    }
+
+    #[test]
+    fn other_apps_data_is_skipped_on_the_internal_disk() {
+        let (cancel, next) = (AtomicBool::new(false), AtomicI64::new(1));
+        let mut slash = shared(&cancel, &next, vec![]);
+        slash.is_slash = true;
+        assert!(slash.skip_dir("Users/otavio/Library/Containers", None));
+        assert!(slash.skip_dir("Users/otavio/Library/Group Containers", None));
+        assert!(!slash.skip_dir("Users/otavio/Library", None));
+        assert!(!slash.skip_dir("Users/otavio/Documents/Containers", None));
+        assert!(!slash.skip_dir("Users/otavio/Library/Containers/x", None), "only the top folder is checked");
+        // External disks (a copied home folder, for example) keep everything.
+        let ext = shared(&cancel, &next, vec![]);
+        assert!(!ext.skip_dir("Users/otavio/Library/Containers", None));
     }
 
     fn fake_entry(is_dir: bool, dataless: bool) -> DirEntry {
