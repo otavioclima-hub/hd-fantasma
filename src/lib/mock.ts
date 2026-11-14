@@ -299,6 +299,7 @@ export const mock = {
     if (d) d.name = a.name;
   },
   async delete_disk(a: { diskId: number }) {
+    await sleep(1500);
     const i = disks.findIndex((x) => x.id === a.diskId);
     if (i >= 0) disks.splice(i, 1);
   },

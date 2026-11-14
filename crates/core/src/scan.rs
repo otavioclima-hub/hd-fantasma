@@ -689,10 +689,7 @@ fn read_disk_inner(
     // e a Releitura completa fazem o mesmo (descartam o que havia do disco e refazem).
     let _ = opts.mode;
     if existing.is_some() {
-        tx.execute(
-            "DELETE FROM items_fts WHERE rowid IN (SELECT id FROM items WHERE disk_id=?1)",
-            [disk_id],
-        )?;
+        crate::db::remove_disk_from_search(&tx, disk_id)?;
         tx.execute("DELETE FROM items WHERE disk_id=?1", [disk_id])?;
     }
 

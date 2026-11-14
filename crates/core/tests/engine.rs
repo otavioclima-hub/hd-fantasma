@@ -229,6 +229,31 @@ fn cancel_rolls_back_and_delete_cleans_search() {
 }
 
 #[test]
+fn deleting_the_biggest_disk_keeps_search_working_for_the_others() {
+    let (_d, _s, mut cat, v) = setup();
+    let big = scan(&mut cat, &v, ReadMode::Full, false);
+    let small_root = tempfile::tempdir().unwrap();
+    write(small_root.path(), "Sobra/Vídeo pequeno.mov", 5);
+    let small = scan(&mut cat, &vol(small_root.path(), "uuid-2"), ReadMode::Full, false);
+    assert!(cat.search(&q("final")).unwrap().total > 0);
+
+    // The big disk is most of the catalog: the search index is rebuilt from what stays.
+    cat.delete_disk(big.id).unwrap();
+    assert_eq!(cat.search(&q("final")).unwrap().total, 0);
+    assert_eq!(cat.search(&q("video peq")).unwrap().total, 1, "accent-free search still works");
+    assert_eq!(cat.search(&q("")).unwrap().total, 2);
+
+    // Reading the disk again and deleting the small one (minority path) also work.
+    let big = scan(&mut cat, &v, ReadMode::Full, false);
+    let again = scan(&mut cat, &v, ReadMode::Full, false);
+    assert_eq!(again.id, big.id);
+    assert_eq!(cat.search(&q("final")).unwrap().total, 2);
+    cat.delete_disk(small.id).unwrap();
+    assert_eq!(cat.search(&q("pequeno")).unwrap().total, 0);
+    assert_eq!(cat.search(&q("final")).unwrap().total, 2);
+}
+
+#[test]
 fn progress_is_emitted_and_ends_with_done() {
     let (_d, _s, mut cat, v) = setup();
     let cancel = AtomicBool::new(false);

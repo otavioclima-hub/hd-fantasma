@@ -50,6 +50,8 @@ export const S = $state({
   readName: "",
   progress: null as ReadProgress | null,
   toast: "" as string,
+  /** Long action in progress (e.g. removing a big disk): shown as a small blocking notice. */
+  busy: "" as string,
   claude: null as ClaudeStatus | null,
   claudeBusy: false,
   claudeError: "",
@@ -356,7 +358,10 @@ export async function renameDisk(d: Disk) {
 export async function removeDisk(d: Disk) {
   const ok = await askConfirm(tr("confirm.removeTitle", { name: d.name }), tr("confirm.removeText"), tr("remove"), true);
   if (!ok) return;
-  try { await api.deleteDisk(d.id); resetNav(); await loadDisks(); toast(tr("toast.removed")); if (searchActive()) runSearch(); } catch (e) { fail(e); }
+  S.busy = tr("busy.removing", { name: d.name });
+  try { await api.deleteDisk(d.id); resetNav(); await loadDisks(); toast(tr("toast.removed")); if (searchActive()) runSearch(); }
+  catch (e) { fail(e); }
+  finally { S.busy = ""; }
 }
 
 export async function exportDisk(d: Disk) {

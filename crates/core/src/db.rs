@@ -46,6 +46,34 @@ CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(name_norm, tokenize='tri
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 "#;
 
+/// Takes one disk's items out of the search index. Deleting FTS rows one by one is slow
+/// (minutes for millions of items), so when the disk holds most of the catalog the index is
+/// rebuilt from the rows that stay, reusing their already-normalized text.
+pub(crate) fn remove_disk_from_search(conn: &Connection, disk_id: i64) -> Result<()> {
+    let mine: i64 = conn.query_row("SELECT COUNT(*) FROM items WHERE disk_id=?1", [disk_id], |r| r.get(0))?;
+    if mine == 0 {
+        return Ok(());
+    }
+    let total: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))?;
+    if mine * 2 <= total {
+        conn.execute("DELETE FROM items_fts WHERE rowid IN (SELECT id FROM items WHERE disk_id=?1)", [disk_id])?;
+        return Ok(());
+    }
+    conn.execute_batch("DROP TABLE IF EXISTS temp.hdf_keep_fts;")?;
+    conn.execute(
+        "CREATE TEMP TABLE hdf_keep_fts AS SELECT f.rowid AS id, f.name_norm AS name_norm
+         FROM items_fts f JOIN items i ON i.id = f.rowid WHERE i.disk_id <> ?1",
+        [disk_id],
+    )?;
+    conn.execute_batch(
+        "DROP TABLE items_fts;
+         CREATE VIRTUAL TABLE items_fts USING fts5(name_norm, tokenize='trigram');
+         INSERT INTO items_fts(rowid, name_norm) SELECT id, name_norm FROM temp.hdf_keep_fts;
+         DROP TABLE temp.hdf_keep_fts;",
+    )?;
+    Ok(())
+}
+
 /// Minúsculas e sem acentos: "Vídeo" -> "video".
 pub fn normalize(s: &str) -> String {
     s.nfd()
@@ -245,10 +273,7 @@ impl Catalog {
     /// Apaga só do catálogo (nunca toca no disco de verdade).
     pub fn delete_disk(&mut self, id: i64) -> Result<()> {
         let tx = self.conn.transaction()?;
-        tx.execute(
-            "DELETE FROM items_fts WHERE rowid IN (SELECT id FROM items WHERE disk_id=?1)",
-            [id],
-        )?;
+        remove_disk_from_search(&tx, id)?;
         tx.execute("DELETE FROM items WHERE disk_id=?1", [id])?;
         tx.execute("DELETE FROM disks WHERE id=?1", [id])?;
         tx.commit()?;
@@ -398,10 +423,7 @@ impl Catalog {
                     .optional()?;
                 let disk_id = match existing {
                     Some(id) => {
-                        self.conn.execute(
-                            "DELETE FROM items_fts WHERE rowid IN (SELECT id FROM items WHERE disk_id=?1)",
-                            [id],
-                        )?;
+                        remove_disk_from_search(&self.conn, id)?;
                         self.conn.execute("DELETE FROM items WHERE disk_id=?1", [id])?;
                         self.conn.execute(
                             "UPDATE disks SET name=?2, filesystem=?3, capacity_bytes=?4, free_bytes=?5,

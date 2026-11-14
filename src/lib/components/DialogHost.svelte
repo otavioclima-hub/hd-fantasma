@@ -17,6 +17,14 @@
   }
 </script>
 
+{#if S.busy}
+  <div class="backdrop" aria-busy="true">
+    <div class="modal" role="status" aria-live="polite" style="width:min(380px,calc(100vw - 32px))">
+      <div class="body busy"><span class="spin" aria-hidden="true"></span>{S.busy}</div>
+    </div>
+  </div>
+{/if}
+
 {#if S.dialog}
   {@const d = S.dialog}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -40,3 +48,10 @@
     </div>
   </div>
 {/if}
+
+<style>
+  .busy { display: flex; align-items: center; gap: 10px; }
+  .spin { width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; flex: none; opacity: .7; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+</style>
