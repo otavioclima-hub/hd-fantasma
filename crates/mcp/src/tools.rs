@@ -298,10 +298,35 @@ fn find_by_path(cat: &Catalog, disk_id: i64, path: &str) -> Result<Option<Item>,
     Ok(current)
 }
 
+/// Rejects argument names not declared in the tool's schema, so a misspelled
+/// field (e.g. `query` instead of `texto`) fails loudly instead of being ignored.
+fn check_unknown_args(name: &str, args: &Value) -> Result<(), String> {
+    let Some(obj) = args.as_object() else { return Ok(()) };
+    let list = tool_list();
+    let Some(props) = list
+        .as_array()
+        .and_then(|ts| ts.iter().find(|t| t["name"] == name))
+        .and_then(|t| t["inputSchema"]["properties"].as_object())
+    else {
+        return Ok(());
+    };
+    let unknown: Vec<&str> = obj.keys().filter(|k| !props.contains_key(*k)).map(|k| k.as_str()).collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let valid: Vec<&str> = props.keys().map(|k| k.as_str()).collect();
+    Err(format!(
+        "Campo(s) desconhecido(s): {}. Campos aceitos em {name}: {}.",
+        unknown.join(", "),
+        if valid.is_empty() { "nenhum".to_string() } else { valid.join(", ") }
+    ))
+}
+
 // ---------------------------------------------------------------- execução
 
 impl Server {
     pub(crate) fn call(&mut self, name: &str, args: &Value) -> R {
+        check_unknown_args(name, args)?;
         match name {
             "listar_discos" => self.listar_discos(),
             "buscar_arquivos" => self.buscar_arquivos(args),
