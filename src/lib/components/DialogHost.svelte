@@ -34,7 +34,6 @@
       </div>
       <footer>
         <button class="btn" onclick={() => done(null)}>{$t("cancel")}</button>
-        {#if d.altLabel}<button class="btn" onclick={() => done("alt")}>{d.altLabel}</button>{/if}
         <button class="btn" class:danger={d.danger} class:primary={!d.danger}
                 onclick={() => done(d.kind === "confirm" ? true : value)}>{d.okLabel}</button>
       </footer>
