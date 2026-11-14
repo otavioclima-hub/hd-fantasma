@@ -20,3 +20,6 @@ vite.config.ts.timestamp-*
 
 # Installer kept by scripts/build-release-mac.sh (only the latest)
 /instalador
+
+# Notas e memória do Claude (dados pessoais, ficam só no computador)
+/memoria
