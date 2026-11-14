@@ -62,6 +62,15 @@ fn is_other_apps_data(rel: &str) -> bool {
     )
 }
 
+/// Apple media libraries (Photos, Music, TV). On the internal disk macOS guards them with its own
+/// prompt ("access your photo library"), and several reader threads reaching one at once showed
+/// that prompt again and again. The library is kept as one item, but the app does not go inside:
+/// its contents are the app's database and UUID-named copies, not something to search by name.
+fn is_media_library(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    [".photoslibrary", ".photolibrary", ".musiclibrary", ".tvlibrary"].iter().any(|ext| n.ends_with(ext))
+}
+
 fn is_ignored(name: &str) -> bool {
     name.starts_with("._") || IGNORED.iter().any(|x| x.eq_ignore_ascii_case(name))
 }
@@ -278,7 +287,9 @@ fn process_job(sh: &Shared, job: &Job, tx: &SyncSender<Batch>, children: &mut Ve
                 child_count: 0,
                 descendant_count: 0,
             }));
-            children.push(Job { dir: e.path_in(&job.dir), rel, id: Some(id) });
+            if !(sh.is_slash && is_media_library(&e.name)) {
+                children.push(Job { dir: e.path_in(&job.dir), rel, id: Some(id) });
+            }
             count += 1;
         } else {
             rows.push(sh.make_file(e, rel, job.id));
@@ -812,6 +823,28 @@ mod tests {
         slash.is_slash = true;
         assert!(slash.skip_dir("Volumes", Some(10)));
         assert!(!slash.skip_dir("Users", Some(10)));
+    }
+
+    #[test]
+    fn media_libraries_are_kept_but_not_entered_on_the_internal_disk() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("Photos Library.photoslibrary/originals")).unwrap();
+        std::fs::create_dir_all(root.path().join("Fotos soltas")).unwrap();
+        assert!(is_media_library("Photos Library.photoslibrary"));
+        assert!(is_media_library("Music Library.MUSICLIBRARY"));
+        assert!(!is_media_library("photoslibrary-notes"));
+        let (cancel, next) = (AtomicBool::new(false), AtomicI64::new(1));
+        for (slash, want_kids) in [(true, 1usize), (false, 2usize)] {
+            let mut sh = shared(&cancel, &next, vec![]);
+            sh.is_slash = slash;
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Batch>(4);
+            let job = Job { dir: root.path().to_path_buf(), rel: String::new(), id: None };
+            let mut kids = Vec::new();
+            assert!(process_job(&sh, &job, &tx, &mut kids));
+            let rows = rx.try_recv().unwrap().rows;
+            assert_eq!(rows.len(), 2, "both folders stay in the catalog");
+            assert_eq!(kids.len(), want_kids, "is_slash={slash}");
+        }
     }
 
     #[test]
