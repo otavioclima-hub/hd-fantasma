@@ -60,15 +60,37 @@ From then on it opens normally.
 1. In Applications, **right-click** (or Control-click) HD Fantasma and choose **Open**.
 2. In the warning, click **Open** again.
 
+## First use
+
+1. Plug in a drive (HD, SSD, USB stick, card) and click **Read disk** at the top of the app.
+2. Choose the drive and wait for the bar to reach 100%. It now shows in the list on the left, and you can unplug it.
+3. To find a file, type its name in the search box. It works with the drive plugged in or sitting in a drawer.
+
+**The Mac's internal disk:** to read the computer's own disk, macOS requires **Full Disk Access**. The app tells you and offers an **Open Settings** button: enable HD Fantasma in the list (if it is not there, click **+** and choose the app in Applications), then quit and reopen the app and read again. External drives don't need this.
+
 ## Where the catalog lives
 
 On your Mac, at **Documents → HD Fantasma → `catalogo.sqlite`**. It is a single file; to back it up, copy that file.
 
 ## Use it with Claude
 
-HD Fantasma can talk to Claude so you can ask things like "which videos over 2 GB do I have on my drives?". In short: open the app once and read a disk, then add HD Fantasma to the Claude Desktop (or Claude Code) settings. The full step-by-step, with text to copy, is in **[docs/MCP.md](docs/MCP.md)** (in Portuguese).
+HD Fantasma can talk to Claude so you can ask things like "where is client X's file?" or "which videos over 2 GB do I have on my drives?". Claude looks it up in the catalog, even with the drive unplugged.
+
+1. Have **Claude Desktop** and/or **Claude Code** installed on the Mac.
+2. In HD Fantasma, click **Connect to Claude** (top of the window). Read the privacy note and confirm.
+3. The button now shows **Claude connected**.
+4. **Quit and reopen Claude Desktop** once (in Claude Code, start a new conversation). Then just ask.
+
+To turn it off, click the same button and choose disconnect. Details and the manual setup, with text to copy, are in **[docs/MCP.md](docs/MCP.md)** (in Portuguese).
 
 ## FAQ
+
+**I connected to Claude but it says it can't find HD Fantasma.**
+Make sure you have opened the app once through "Open Anyway" (see above) and quit and reopened Claude after connecting. If it still fails, open the **Terminal** app, paste the line below and press Enter. It only removes the "downloaded from the internet" mark from the app:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/HD Fantasma.app"
+```
 
 **Is there a Windows version?**
 Coming soon. Mac comes first.

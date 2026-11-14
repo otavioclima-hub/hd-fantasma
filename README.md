@@ -60,15 +60,37 @@ Pronto: nas próximas vezes ele abre normalmente.
 1. Na pasta Aplicativos, **clique com o botão direito** (ou Control + clique) no HD Fantasma e escolha **Abrir**.
 2. No aviso, clique em **Abrir** de novo.
 
+## Primeiro uso
+
+1. Plugue um disco (HD, SSD, pen drive, cartão) e clique em **Ler disco**, no topo do app.
+2. Escolha o disco e espere a barra chegar a 100%. Pronto: ele já aparece na lista da esquerda, e você pode desplugar.
+3. Para achar um arquivo, digite o nome na busca. Funciona com o disco plugado ou guardado na gaveta.
+
+**Disco interno do Mac:** para ler o próprio disco do computador, o macOS exige o **Acesso Total ao Disco**. O app avisa e oferece o botão **Abrir Ajustes**: ative o HD Fantasma na lista (se ele não aparecer, clique em **+** e escolha o app em Aplicativos), depois feche e abra o app e leia de novo. Discos externos não precisam disso.
+
 ## Onde fica o catálogo
 
 No seu Mac, em **Documentos → HD Fantasma → `catalogo.sqlite`**. É um arquivo só. Para fazer cópia de segurança, copie esse arquivo.
 
 ## Usar com o Claude
 
-O HD Fantasma pode conversar com o Claude, para você perguntar coisas como "quais vídeos com mais de 2 GB eu tenho nos meus HDs?". Em resumo: abra o app uma vez e leia um disco, depois acrescente o HD Fantasma nas configurações do Claude Desktop (ou do Claude Code). O passo a passo completo, com os textos para copiar, está em **[docs/MCP.md](docs/MCP.md)**.
+O HD Fantasma pode conversar com o Claude, para você perguntar coisas como "onde está o arquivo do cliente X?" ou "quais vídeos com mais de 2 GB eu tenho nos meus HDs?". O Claude consulta o catálogo, mesmo com o disco desplugado.
+
+1. Tenha o **Claude Desktop** e/ou o **Claude Code** instalado no Mac.
+2. No HD Fantasma, clique em **Conectar ao Claude** (canto de cima). Leia o aviso de privacidade e confirme.
+3. O botão passa a mostrar **Claude conectado**.
+4. **Feche e abra o Claude Desktop** uma vez (no Claude Code, abra uma conversa nova). Depois é só perguntar.
+
+Para desligar, clique no mesmo botão e escolha desconectar. Detalhes e o jeito manual, com os textos para copiar, estão em **[docs/MCP.md](docs/MCP.md)**.
 
 ## Perguntas frequentes
+
+**Conectei ao Claude, mas ele diz que não acha o HD Fantasma.**
+Confira se você já abriu o app uma vez pelo caminho "Abrir Mesmo Assim" (veja acima) e se fechou e abriu o Claude depois de conectar. Se ainda assim não funcionar, abra o app **Terminal**, cole a linha abaixo e aperte Enter. Ela só tira a marca de "baixado da internet" do app:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/HD Fantasma.app"
+```
 
 **Tem para Windows?**
 Em breve. O Mac vem primeiro.

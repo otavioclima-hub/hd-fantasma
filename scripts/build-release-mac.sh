@@ -27,6 +27,16 @@ for t in aarch64-apple-darwin x86_64-apple-darwin; do
 done
 echo "ok: no networking library"
 
+# Keep the builder's folders (user name, project path) out of the binaries: Rust embeds source paths
+# for error messages. With several matching prefixes rustc applies the last one, so generic first.
+# CARGO_ENCODED_RUSTFLAGS (0x1f separated) because the project path may contain spaces.
+SEP=$'\x1f'
+REMAP=("--remap-path-prefix=$HOME=/home" "--remap-path-prefix=$HOME/.cargo/registry/src=/crates"
+  "--remap-path-prefix=$HOME/.cargo/git/checkouts=/crates-git" "--remap-path-prefix=$HOME/.rustup=/rustup"
+  "--remap-path-prefix=$ROOT=/hd-fantasma")
+export CARGO_ENCODED_RUSTFLAGS="$(IFS="$SEP"; echo "${REMAP[*]}")"
+unset RUSTFLAGS
+
 echo ">> 1/3 MCP sidecar (universal)"
 scripts/build-mcp-sidecar.sh --universal
 
@@ -73,6 +83,8 @@ if [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
   codesign --verify --deep --strict "$APP" || { echo "SIGNATURE CHECK FAILED"; fail=1; }
   codesign -dr - "$APP" 2>&1 | grep -q "certificate leaf" || { echo "NOT signed with the local certificate"; fail=1; }
 fi
+# No path from the builder's computer may be left inside the app.
+if grep -rqaF "$HOME" "$APP"; then echo "BUILDER PATH ($HOME) FOUND INSIDE THE APP"; grep -rlaF "$HOME" "$APP"; fail=1; fi
 [[ $fail -eq 0 ]] || { echo "CHECK FAILED" >&2; exit 1; }
 
 # Only the installer is kept (instalador/): a runnable .app left in the project can get stale and
