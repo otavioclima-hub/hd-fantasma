@@ -453,3 +453,31 @@ fn parallel_walk_matches_reference_walk() {
         assert_eq!(catalog_rows(&dbp).0, expected);
     }
 }
+
+/// ADR 0014: pastas de nuvem que ficam sem arquivo somem; a irmã com arquivo fica.
+#[test]
+fn empty_cloud_folders_are_pruned() {
+    let data = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let root = data.path();
+    write(root, "Library/CloudStorage/X/real/arquivo.txt", 10);
+    fs::create_dir_all(root.join("Library/CloudStorage/X/empty/sub")).unwrap();
+    fs::create_dir_all(root.join("Outra/vazia")).unwrap(); // fora da nuvem: continua
+    let mut cat = Catalog::open(store.path().join("c.sqlite")).unwrap();
+    let v = vol(root, "uuid-cloud");
+    let disk = scan(&mut cat, &v, ReadMode::Full, false);
+    let paths = catalog_rows(&store.path().join("c.sqlite")).0;
+    assert!(paths.contains_key("Library/CloudStorage/X/real/arquivo.txt"));
+    assert!(paths.contains_key("Library/CloudStorage/X/real"));
+    assert!(!paths.contains_key("Library/CloudStorage/X/empty"), "pasta de nuvem vazia podada");
+    assert!(!paths.contains_key("Library/CloudStorage/X/empty/sub"));
+    assert!(paths.contains_key("Outra/vazia"), "pasta vazia fora da nuvem fica");
+    // 1 (Library) + CloudStorage + X + real + arquivo + Outra + vazia = 7
+    assert_eq!(disk.item_count, 7);
+    let cs = cat.list_children(disk.id, None).unwrap();
+    let lib = cs.iter().find(|i| i.name == "Library").unwrap();
+    let kids = cat.list_children(disk.id, Some(lib.id)).unwrap();
+    let cloud = kids.iter().find(|i| i.name == "CloudStorage").unwrap();
+    let xs = cat.list_children(disk.id, Some(cloud.id)).unwrap();
+    assert_eq!(xs[0].child_count, 1, "X ficou só com a pasta real");
+}

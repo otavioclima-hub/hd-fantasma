@@ -8,8 +8,63 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-/// Bit `SF_DATALESS` de `st_flags`: o arquivo só existe na nuvem (ADR 0011).
+/// Bit `SF_DATALESS` de `st_flags`: o item só existe na nuvem (ADR 0014).
 pub const SF_DATALESS: u32 = 0x4000_0000;
+
+/// Os flags do item dizem "só na nuvem"?
+pub fn flags_dataless(flags: u32) -> bool {
+    flags & SF_DATALESS != 0
+}
+
+/// `errno` que o macOS devolve ao tentar abrir/listar algo só na nuvem com a política de
+/// materialização desligada (`setiopolicy_np(3)`): EDEADLK.
+pub fn is_policy_errno(errno: i32) -> bool {
+    errno == libc_edeadlk()
+}
+#[cfg(unix)]
+fn libc_edeadlk() -> i32 {
+    libc::EDEADLK
+}
+#[cfg(not(unix))]
+fn libc_edeadlk() -> i32 {
+    -1
+}
+
+/// Liga, NESTA thread, a política do macOS "nunca baixar arquivos/pastas só da nuvem"
+/// (`IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES` = OFF). Chamar no início de cada thread
+/// leitora. Falha é ignorada (devolve `false`); fora do macOS não faz nada.
+pub fn disable_materialize_this_thread() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // Valores do SDK (sys/resource.h).
+        const IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES: i32 = 3;
+        const IOPOL_SCOPE_THREAD: i32 = 1;
+        const IOPOL_MATERIALIZE_DATALESS_FILES_OFF: i32 = 1;
+        unsafe extern "C" {
+            fn setiopolicy_np(iotype: i32, scope: i32, policy: i32) -> i32;
+        }
+        unsafe {
+            setiopolicy_np(
+                IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES,
+                IOPOL_SCOPE_THREAD,
+                IOPOL_MATERIALIZE_DATALESS_FILES_OFF,
+            ) == 0
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// Por que uma pasta não foi listada.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListErr {
+    /// A política "não baixar da nuvem" barrou (a pasta só existe na nuvem): pular em silêncio.
+    Policy,
+    /// Não abriu (permissão, sumiu etc.).
+    Failed,
+}
 
 #[derive(Debug, Clone)]
 pub struct Entry {
@@ -23,7 +78,7 @@ pub struct Entry {
     pub alloc: u64,
     pub created: Option<i64>,
     pub modified: Option<i64>,
-    /// Arquivo que só existe na nuvem: nunca deve ser aberto (ADR 0011).
+    /// Arquivo ou pasta que só existe na nuvem (`SF_DATALESS`): fica fora do catálogo (ADR 0014).
     pub dataless: bool,
     /// Id do dispositivo da pasta (só pastas; para não atravessar pontos de montagem).
     pub dev: Option<u64>,
@@ -46,20 +101,33 @@ pub struct Listing {
 
 /// Lista `dir`. `None` = a pasta não pôde ser aberta.
 pub fn list_dir(dir: &Path) -> Option<Listing> {
+    list_dir_ex(dir).ok()
+}
+
+/// Igual a [`list_dir`], dizendo se foi a política da nuvem que barrou.
+pub fn list_dir_ex(dir: &Path) -> Result<Listing, ListErr> {
     #[cfg(target_os = "macos")]
     {
         match bulk::list(dir) {
-            Ok(l) => return Some(l),
-            Err(bulk::BulkErr::Open) => return None,
+            Ok(l) => return Ok(l),
+            Err(bulk::BulkErr::Open(e)) => {
+                return Err(if is_policy_errno(e) { ListErr::Policy } else { ListErr::Failed });
+            }
             Err(bulk::BulkErr::Unsupported) => {}
         }
     }
-    list_std(dir)
+    list_std_ex(dir)
 }
 
 /// Caminho "portátil": `read_dir` + `symlink_metadata`.
 pub fn list_std(dir: &Path) -> Option<Listing> {
-    let rd = std::fs::read_dir(dir).ok()?;
+    list_std_ex(dir).ok()
+}
+
+fn list_std_ex(dir: &Path) -> Result<Listing, ListErr> {
+    let rd = std::fs::read_dir(dir).map_err(|e| {
+        if e.raw_os_error().is_some_and(is_policy_errno) { ListErr::Policy } else { ListErr::Failed }
+    })?;
     let mut entries = Vec::new();
     let mut skipped = 0u64;
     for e in rd {
@@ -86,14 +154,14 @@ pub fn list_std(dir: &Path) -> Option<Listing> {
             raw_name,
             is_dir: ft.is_dir(),
             size: if ft.is_dir() { 0 } else { md.len() },
-            alloc: if ft.is_dir() || md_flags(&md) & SF_DATALESS != 0 { 0 } else { md_alloc(&md) },
+            alloc: if ft.is_dir() || flags_dataless(md_flags(&md)) { 0 } else { md_alloc(&md) },
             created: secs(md.created()),
             modified: secs(md.modified()),
-            dataless: !ft.is_dir() && md_flags(&md) & SF_DATALESS != 0,
+            dataless: flags_dataless(md_flags(&md)),
             dev: if ft.is_dir() { md_dev(&md) } else { None },
         });
     }
-    Some(Listing { entries, skipped })
+    Ok(Listing { entries, skipped })
 }
 
 fn secs(t: std::io::Result<std::time::SystemTime>) -> Option<i64> {
@@ -137,7 +205,7 @@ pub fn md_dev(_md: &std::fs::Metadata) -> Option<u64> {
 
 #[cfg(target_os = "macos")]
 mod bulk {
-    use super::{Entry, Listing, SF_DATALESS, md_dev};
+    use super::{Entry, Listing, md_dev};
     use libc::{
         ATTR_BIT_MAP_COUNT, ATTR_CMN_CRTIME, ATTR_CMN_FLAGS, ATTR_CMN_MODTIME, ATTR_CMN_NAME,
         ATTR_CMN_OBJTYPE, ATTR_CMN_RETURNED_ATTRS, ATTR_FILE_ALLOCSIZE, ATTR_FILE_DATALENGTH, FSOPT_PACK_INVAL_ATTRS,
@@ -155,7 +223,7 @@ mod bulk {
 
     pub enum BulkErr {
         /// Não conseguiu abrir a pasta (permissão, sumiu): não adianta tentar de outro jeito.
-        Open,
+        Open(i32),
         /// A chamada não funciona neste sistema de arquivos: usar o caminho portátil.
         Unsupported,
     }
@@ -167,6 +235,10 @@ mod bulk {
         }
     }
 
+    fn errno() -> i32 {
+        std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+    }
+
     fn rd32(buf: &[u8], off: usize) -> u32 {
         u32::from_ne_bytes(buf[off..off + 4].try_into().unwrap())
     }
@@ -175,10 +247,10 @@ mod bulk {
     }
 
     pub fn list(dir: &Path) -> Result<Listing, BulkErr> {
-        let c = CString::new(dir.as_os_str().as_bytes()).map_err(|_| BulkErr::Open)?;
+        let c = CString::new(dir.as_os_str().as_bytes()).map_err(|_| BulkErr::Open(0))?;
         let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
         if fd < 0 {
-            return Err(BulkErr::Open);
+            return Err(BulkErr::Open(errno()));
         }
         let fd = Fd(fd);
 
@@ -212,6 +284,10 @@ mod bulk {
                 )
             };
             if n < 0 {
+                let e = errno();
+                if super::is_policy_errno(e) {
+                    return Err(BulkErr::Open(e));
+                }
                 return Err(BulkErr::Unsupported);
             }
             if n == 0 {
@@ -258,8 +334,13 @@ mod bulk {
         if ret_common & ATTR_CMN_ERROR != 0 {
             // O campo de erro vem logo depois do conjunto devolvido; diferente de 0 = o
             // sistema não leu este item (e o resto do registro não vale).
-            if rec.len() < o + 4 || rd32(rec, o) != 0 {
+            if rec.len() < o + 4 {
                 return Parsed::Failed;
+            }
+            let err = rd32(rec, o) as i32;
+            if err != 0 {
+                // Política da nuvem barrou este item: ele só existe na nuvem, pula em silêncio.
+                return if super::is_policy_errno(err) { Parsed::Skip } else { Parsed::Failed };
             }
             o += 4;
         }
@@ -305,7 +386,8 @@ mod bulk {
                 Some(OsString::from_vec(bytes.to_vec())),
             ),
         };
-        let dev = if is_dir {
+        let dataless = ret_common & ATTR_CMN_FLAGS != 0 && super::flags_dataless(flags);
+        let dev = if is_dir && !dataless {
             // O dev da própria pasta (não o da pasta-pai) diz se é um ponto de montagem.
             let full = match &raw_name {
                 Some(r) => dir.join(r),
@@ -325,7 +407,7 @@ mod bulk {
             size: if !is_dir && ret_file & ATTR_FILE_DATALENGTH != 0 { datalen.max(0) as u64 } else { 0 },
             alloc: if !is_dir
                 && ret_file & ATTR_FILE_ALLOCSIZE != 0
-                && !(ret_common & ATTR_CMN_FLAGS != 0 && flags & SF_DATALESS != 0)
+                && !dataless
             {
                 alloclen.max(0) as u64
             } else {
@@ -333,7 +415,7 @@ mod bulk {
             },
             created: if ret_common & ATTR_CMN_CRTIME != 0 { Some(crtime) } else { None },
             modified: if ret_common & ATTR_CMN_MODTIME != 0 { Some(modtime) } else { None },
-            dataless: !is_dir && ret_common & ATTR_CMN_FLAGS != 0 && flags & SF_DATALESS != 0,
+            dataless,
             dev,
         })
     }
@@ -343,6 +425,23 @@ mod bulk {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn dataless_flag_and_policy_errno() {
+        assert!(flags_dataless(0x4000_0060));
+        assert!(!flags_dataless(0x0000_0060));
+        #[cfg(unix)]
+        {
+            assert!(is_policy_errno(libc::EDEADLK));
+            assert!(!is_policy_errno(libc::EACCES));
+            assert!(!is_policy_errno(libc::ENOENT));
+        }
+        // Pasta normal: a política ligada não atrapalha a listagem.
+        disable_materialize_this_thread();
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(list_dir_ex(d.path()).map(|l| l.entries.len()), Ok(0));
+        assert_eq!(list_dir_ex(&d.path().join("nao-existe")).err(), Some(ListErr::Failed));
+    }
 
     fn brief(l: &Listing) -> BTreeMap<String, (bool, u64, Option<i64>, Option<i64>, bool)> {
         l.entries

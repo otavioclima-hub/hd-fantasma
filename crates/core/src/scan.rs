@@ -6,6 +6,9 @@
 //! fica exatamente como estava. Os itens vão direto para o banco (streaming), então
 //! discos com milhões de itens não esgotam a memória.
 //!
+//! Nuvem (ADR 0014): cada thread leitora liga a política "não baixar da nuvem"; itens
+//! `SF_DATALESS` ficam fora e pastas de nuvem que sobram vazias são podadas no fim.
+//!
 //! Desenho (ADR 0011 e 0012): várias threads "leitoras" tiram pastas de uma fila
 //! compartilhada, listam cada uma (`fastdir::list_dir`) e devolvem as pastas filhas à fila.
 //! Os ids dos itens saem de um contador atômico, então o pai já é conhecido quando o filho
@@ -16,10 +19,10 @@
 
 use crate::db::{Catalog, normalize, now_iso};
 use crate::error::{Error, Result};
-use crate::fastdir::{self, Entry as DirEntry};
+use crate::fastdir::{self, Entry as DirEntry, ListErr};
 use crate::model::*;
 use rusqlite::{Connection, Statement, params};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, SyncSender};
@@ -77,6 +80,17 @@ pub fn iso_from_unix(secs: i64) -> String {
 /// O caminho está numa pasta de nuvem (leitura lenta, que espera a rede).
 fn is_cloud_path(p: &str) -> bool {
     p.contains("/Library/CloudStorage/") || p.contains("/Library/Mobile Documents/")
+}
+
+/// Caminho relativo `rel` (dentro de `root`) está numa pasta de nuvem?
+fn is_cloud_rel(root: &str, rel: &str) -> bool {
+    let full = if rel.is_empty() { format!("{}/", root.trim_end_matches('/')) } else { format!("{}/{}/", root.trim_end_matches('/'), rel) };
+    is_cloud_path(&full)
+}
+
+/// Item só na nuvem (arquivo ou pasta `SF_DATALESS`): fora do catálogo, sem contar nem descer.
+fn skip_entry(e: &DirEntry) -> bool {
+    e.dataless
 }
 
 fn ext_of(name: &str) -> Option<String> {
@@ -187,22 +201,47 @@ enum Out {
     File(Item),
 }
 
+/// Resumo de uma pasta já listada.
+struct Agg {
+    id: i64,
+    /// Soma dos arquivos diretos.
+    size: u64,
+    /// Nº de filhos diretos (arquivos + pastas).
+    count: u64,
+    /// Nº de arquivos diretos.
+    files: u64,
+    /// A política da nuvem barrou a listagem (a pasta só existe na nuvem).
+    policy_skip: bool,
+}
+
 struct Batch {
     rows: Vec<Out>,
-    /// (id da pasta, soma dos arquivos diretos, nº de filhos diretos) quando a pasta acabou.
-    agg: Option<(i64, u64, u64)>,
+    /// Quando a pasta acabou.
+    agg: Option<Agg>,
 }
 
 /// Lista uma pasta e devolve as pastas filhas a visitar. `false` = parar (receptor sumiu).
 fn process_job(sh: &Shared, job: &Job, tx: &SyncSender<Batch>, children: &mut Vec<Job>) -> bool {
-    let Some(listing) = fastdir::list_dir(&job.dir) else {
-        sh.skipped.fetch_add(1, Ordering::Relaxed);
-        return true;
+    let listing = match fastdir::list_dir_ex(&job.dir) {
+        Ok(l) => l,
+        Err(ListErr::Policy) => {
+            // Pasta só na nuvem: pula em silêncio (não é falha de leitura).
+            let Some(id) = job.id else { return true };
+            let agg = Agg { id, size: 0, count: 0, files: 0, policy_skip: true };
+            return tx.send(Batch { rows: Vec::new(), agg: Some(agg) }).is_ok();
+        }
+        Err(ListErr::Failed) => {
+            sh.skipped.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
     };
     sh.skipped.fetch_add(listing.skipped, Ordering::Relaxed);
-    let (mut size, mut count) = (0u64, 0u64);
+    let (mut size, mut count, mut files) = (0u64, 0u64, 0u64);
     let mut rows: Vec<Out> = Vec::with_capacity(listing.entries.len().min(BATCH_ROWS));
     for e in &listing.entries {
+        if skip_entry(e) {
+            continue;
+        }
         if !sh.include_hidden && is_ignored(&e.name) {
             continue;
         }
@@ -232,6 +271,7 @@ fn process_job(sh: &Shared, job: &Job, tx: &SyncSender<Batch>, children: &mut Ve
             sh.bytes_seen.fetch_add(e.alloc, Ordering::Relaxed);
             size += e.size;
             count += 1;
+            files += 1;
         }
         if rows.len() >= BATCH_ROWS {
             if sh.stopped() {
@@ -243,11 +283,13 @@ fn process_job(sh: &Shared, job: &Job, tx: &SyncSender<Batch>, children: &mut Ve
             }
         }
     }
-    let agg = job.id.map(|id| (id, size, count));
+    let agg = job.id.map(|id| Agg { id, size, count, files, policy_skip: false });
     tx.send(Batch { rows, agg }).is_ok()
 }
 
 fn worker(sh: &Shared, q: &Queue, tx: SyncSender<Batch>) {
+    // Nunca baixar nada da nuvem para o app (ADR 0014); a política vale por thread.
+    fastdir::disable_materialize_this_thread();
     loop {
         let job = {
             let mut g = q.lock();
@@ -292,12 +334,39 @@ struct DirAgg {
     parent: Option<i64>,
     size: u64,
     count: u64,
+    /// Arquivos diretos.
+    files: u64,
+    /// A pasta está numa pasta de nuvem (candidata à poda).
+    cloud: bool,
+    /// A listagem foi barrada pela política da nuvem (sempre podada).
+    policy_skip: bool,
+}
+
+/// Poda de pastas vazias: `dirs` = (id, pai, arquivos diretos, é candidata). Devolve os ids
+/// a remover (candidatas sem nenhum arquivo embaixo, recursivamente).
+fn empty_dirs(dirs: &[(i64, Option<i64>, u64, bool)]) -> HashSet<i64> {
+    let mut order: Vec<&(i64, Option<i64>, u64, bool)> = dirs.iter().collect();
+    order.sort_unstable_by_key(|d| d.0);
+    let mut has_file: HashSet<i64> = HashSet::new();
+    let mut dead = HashSet::new();
+    // Filho tem id maior que o pai: do maior para o menor, os filhos já foram vistos.
+    for &&(id, parent, files, candidate) in order.iter().rev() {
+        if files > 0 || has_file.contains(&id) {
+            if let Some(p) = parent {
+                has_file.insert(p);
+            }
+        } else if candidate {
+            dead.insert(id);
+        }
+    }
+    dead
 }
 
 /// A thread escritora: dona da conexão SQLite.
 struct Writer<'a> {
     ins: Statement<'a>,
     upd: Statement<'a>,
+    del: Statement<'a>,
     uuid: String,
     cancel: &'a AtomicBool,
     progress: &'a mut dyn FnMut(ReadProgress),
@@ -310,6 +379,7 @@ struct Writer<'a> {
     bytes_seen: &'a AtomicU64,
     bytes_expected: u64,
     last_path: Option<String>,
+    root_str: String,
 }
 
 impl<'a> Writer<'a> {
@@ -353,7 +423,10 @@ impl<'a> Writer<'a> {
             Out::Folder(item) => {
                 self.insert(&item)?;
                 self.item_count += 1;
-                self.dirs.entry(item.id).or_default().parent = item.parent_id;
+                let cloud = is_cloud_rel(&self.root_str, &item.path);
+                let d = self.dirs.entry(item.id).or_default();
+                d.parent = item.parent_id;
+                d.cloud = cloud;
             }
             Out::File(item) => {
                 self.insert(&item)?;
@@ -406,10 +479,12 @@ impl<'a> Writer<'a> {
                         if outcome.is_err() {
                             break;
                         }
-                        if let Some((id, size, count)) = batch.agg {
-                            let a = self.dirs.entry(id).or_default();
-                            a.size = size;
-                            a.count = count;
+                        if let Some(g) = batch.agg {
+                            let a = self.dirs.entry(g.id).or_default();
+                            a.size = g.size;
+                            a.count = g.count;
+                            a.files = g.files;
+                            a.policy_skip = g.policy_skip;
                         }
                         if self.last_emit.elapsed() >= Duration::from_millis(200) {
                             self.emit(last.as_deref(), None);
@@ -435,6 +510,34 @@ impl<'a> Writer<'a> {
             outcome = Err(Error::Cancelled);
         }
         outcome
+    }
+
+    /// Poda as pastas de nuvem que ficaram sem nenhum arquivo embaixo (e as que a política da
+    /// nuvem barrou), antes de somar tamanhos. Ajusta a contagem de filhos dos pais.
+    fn prune_empty_cloud_dirs(&mut self) -> Result<()> {
+        let flat: Vec<(i64, Option<i64>, u64, bool)> =
+            self.dirs.iter().map(|(&id, a)| (id, a.parent, a.files, a.cloud || a.policy_skip)).collect();
+        let dead = empty_dirs(&flat);
+        if dead.is_empty() {
+            return Ok(());
+        }
+        for &id in &dead {
+            if let Some(p) = self.dirs[&id].parent {
+                if !dead.contains(&p) {
+                    if let Some(pa) = self.dirs.get_mut(&p) {
+                        pa.count = pa.count.saturating_sub(1);
+                    }
+                }
+            }
+        }
+        for &id in &dead {
+            self.del.execute([id])?;
+        }
+        for id in &dead {
+            self.dirs.remove(id);
+        }
+        self.item_count -= dead.len() as u64;
+        Ok(())
     }
 
     /// Soma tamanho e nº de filhos das pastas, de baixo para cima. Um filho sempre tem id
@@ -588,6 +691,7 @@ fn read_disk_inner(
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             )?,
             upd: conn.prepare("UPDATE items SET size_bytes=?1, child_count=?2 WHERE id=?3")?,
+            del: conn.prepare("DELETE FROM items WHERE id=?1")?,
             uuid: vol.uuid.clone(),
             cancel,
             progress: &mut *progress,
@@ -600,9 +704,11 @@ fn read_disk_inner(
             bytes_seen: &bytes_seen,
             bytes_expected,
             last_path: None,
+            root_str: vol.mount_path.clone(),
         };
         w.emit(None, None);
         w.run_listing(&sh, &root, threads)?;
+        w.prune_empty_cloud_dirs()?;
         w.phase = Phase::Saving;
         w.emit(None, Some("Somando o tamanho das pastas".into()));
         w.fold_dirs()?;
@@ -684,6 +790,72 @@ mod tests {
         slash.is_slash = true;
         assert!(slash.skip_dir("Volumes", Some(10)));
         assert!(!slash.skip_dir("Users", Some(10)));
+    }
+
+    fn fake_entry(is_dir: bool, dataless: bool) -> DirEntry {
+        DirEntry {
+            name: "x".into(),
+            raw_name: None,
+            is_dir,
+            size: 0,
+            alloc: 0,
+            created: None,
+            modified: None,
+            dataless,
+            dev: None,
+        }
+    }
+
+    #[test]
+    fn dataless_entries_are_skipped() {
+        let flags = 0x4000_0060u32; // SF_DATALESS + outros bits, como medido no Google Drive
+        assert!(fastdir::flags_dataless(flags));
+        assert!(skip_entry(&fake_entry(false, fastdir::flags_dataless(flags))), "arquivo");
+        assert!(skip_entry(&fake_entry(true, fastdir::flags_dataless(flags))), "pasta");
+        assert!(!skip_entry(&fake_entry(false, fastdir::flags_dataless(0x60))));
+        assert!(!skip_entry(&fake_entry(true, false)));
+    }
+
+    #[test]
+    fn policy_error_maps_to_silent_skip() {
+        #[cfg(unix)]
+        {
+            assert!(fastdir::is_policy_errno(libc::EDEADLK));
+            assert!(!fastdir::is_policy_errno(libc::EACCES));
+        }
+        // Uma pasta barrada pela política vira "pular", não "falha de leitura".
+        let (cancel, next) = (AtomicBool::new(false), AtomicI64::new(1));
+        let sh = shared(&cancel, &next, vec![]);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Batch>(4);
+        let job = Job { dir: PathBuf::from("/nao/existe/mesmo"), rel: "x".into(), id: Some(7) };
+        let mut kids = Vec::new();
+        assert!(process_job(&sh, &job, &tx, &mut kids));
+        assert_eq!(sh.skipped.load(Ordering::Relaxed), 1, "erro comum conta como falha");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn empty_cloud_chain_is_pruned_but_sibling_with_file_stays() {
+        // 1 = nuvem/X (tem filho com arquivo); 2 = vazia; 3 = vazia/sub; 4 = com arquivo.
+        // 5 = pasta fora da nuvem, vazia (não é candidata).
+        let dirs = vec![
+            (1, None, 0, true),
+            (2, Some(1), 0, true),
+            (3, Some(2), 0, true),
+            (4, Some(1), 3, true),
+            (5, None, 0, false),
+        ];
+        let dead = empty_dirs(&dirs);
+        assert_eq!(dead, HashSet::from([2, 3]));
+    }
+
+    #[test]
+    fn cloud_relative_paths() {
+        assert!(is_cloud_rel("/Users/x/Library/CloudStorage", "GoogleDrive-a/b"));
+        assert!(is_cloud_rel("/Users/x/Library", "CloudStorage/GoogleDrive-a"));
+        assert!(is_cloud_rel("/", "Users/x/Library/Mobile Documents/c"));
+        assert!(!is_cloud_rel("/Users/x/Library", "Caches/a"));
+        assert!(!is_cloud_rel("/Volumes/HD", "Projetos"));
     }
 
     #[test]
