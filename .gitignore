@@ -17,3 +17,6 @@ vite.config.ts.timestamp-*
 *.sqlite-wal
 *.sqlite-shm
 *.hdfantasma
+
+# Installer kept by scripts/build-release-mac.sh (only the latest)
+/instalador

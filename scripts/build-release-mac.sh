@@ -75,9 +75,17 @@ if [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
 fi
 [[ $fail -eq 0 ]] || { echo "CHECK FAILED" >&2; exit 1; }
 
-# Keep Spotlight/Launchpad from opening this build copy instead of the installed app.
+# Only the installer is kept (instalador/): a runnable .app left in the project can get stale and
+# be opened by Spotlight instead of the installed one. Older installers are removed.
+OUT="$ROOT/instalador"
+mkdir -p "$OUT"
+NAME="HD Fantasma $(date +%Y-%m-%d_%H%M) $(git rev-parse --short HEAD)$(git diff --quiet HEAD -- . ':!instalador' || echo '-modificado').dmg"
+find "$OUT" -maxdepth 1 -name '*.dmg' -delete
+mv "$DMG" "$OUT/$NAME"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$APP" 2>/dev/null || true
+rm -rf "$APP"
 
 echo
-echo "DMG: $DMG"
-echo "Size: $(du -h "$DMG" | cut -f1)"
+echo "DMG: $OUT/$NAME"
+echo "Size: $(du -h "$OUT/$NAME" | cut -f1)"
+echo "Install it with: scripts/install-mac.sh"
