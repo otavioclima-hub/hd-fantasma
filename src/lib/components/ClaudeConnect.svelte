@@ -33,6 +33,7 @@
   {#if open}
     <div class="pop" role="dialog" aria-label={$t("claude.title")}>
       <div class="intro muted">{$t("claude.intro")}</div>
+      <div class="privacy">{$t("claude.privacy")}</div>
 
       {#if !c}
         <div class="muted pad">{$t("claude.checking")}</div>
@@ -93,6 +94,7 @@
     border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); padding: 12px; display: flex; flex-direction: column; gap: 8px;
   }
   .intro { font-size: 12px; padding-bottom: 2px; }
+  .privacy { font-size: 11px; line-height: 1.4; color: var(--fg-2); background: var(--bg-3); border-radius: 6px; padding: 7px 9px; margin: 6px 0 8px; }
   .pad { padding: 6px 0; }
   .row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--border); }
   .name { font-weight: 600; flex: 1; }

@@ -173,7 +173,12 @@ impl Catalog {
             .iter()
             .find(|v| v.uuid == disk.uuid)
             .ok_or_else(|| Error::msg("O disco não está plugado."))?;
-        let p = PathBuf::from(&vol.mount_path).join(&item.path);
+        // The catalog path must stay inside the disk: only plain names, no `..`, not absolute.
+        let rel = std::path::Path::new(&item.path);
+        if !rel.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+            return Err(Error::msg("O caminho deste item no catálogo não é válido."));
+        }
+        let p = PathBuf::from(&vol.mount_path).join(rel);
         if !p.exists() {
             return Err(Error::msg("O arquivo não existe mais no disco (o catálogo pode estar desatualizado)."));
         }

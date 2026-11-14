@@ -70,6 +70,9 @@ pub fn default_catalog_path() -> Result<PathBuf> {
     Ok(docs.join("HD Fantasma").join("catalogo.sqlite"))
 }
 
+/// Extension of an exported disk file.
+pub const EXPORT_EXT: &str = "hdfantasma";
+
 pub struct Catalog {
     pub(crate) conn: Connection,
     path: PathBuf,
@@ -271,7 +274,24 @@ impl Catalog {
     pub fn export_disk(&self, disk_id: i64, dest: impl AsRef<Path>) -> Result<()> {
         let disk = self.get_disk(disk_id)?;
         let dest = dest.as_ref();
+        // The only file this app ever replaces is an export the person chose: it must be a
+        // `.hdfantasma`, and never the live catalog itself.
+        let is_export = dest
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case(EXPORT_EXT))
+            .unwrap_or(false);
+        if !is_export {
+            return Err(Error::msg("O arquivo de exportação precisa terminar em .hdfantasma."));
+        }
+        if let (Ok(a), Ok(b)) = (std::fs::canonicalize(dest), std::fs::canonicalize(&self.path)) {
+            if a == b {
+                return Err(Error::msg("Escolha outro lugar: este é o catálogo em uso."));
+            }
+        }
         if dest.exists() {
+            if !dest.is_file() {
+                return Err(Error::msg("Já existe uma pasta com esse nome. Escolha outro nome."));
+            }
             std::fs::remove_file(dest)?;
         }
         if let Some(dir) = dest.parent() {
@@ -321,8 +341,8 @@ impl Catalog {
         // Valida antes de anexar.
         {
             let probe = Connection::open_with_flags(
-                src,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                readonly_uri(src)?,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
             )
             .map_err(|_| Error::msg("Este arquivo não é uma exportação válida do HD Fantasma."))?;
             let ok: rusqlite::Result<i64> = probe.query_row(
@@ -344,9 +364,11 @@ impl Catalog {
                 ));
             }
         }
-        self.conn
-            .execute("ATTACH DATABASE ?1 AS imp", [src.to_string_lossy().as_ref()])?;
+        // Attached read-only and immutable: importing never writes anything next to the file
+        // (no -wal/-shm, no lock), wherever it lives.
+        self.conn.execute("ATTACH DATABASE ?1 AS imp", [readonly_uri(src)?])?;
         let r = (|| -> Result<i64> {
+            validate_import(&self.conn)?;
             let src_disk: (String, String, String, i64, i64, i64, i64, String) = self
                 .conn
                 .query_row(
@@ -438,6 +460,59 @@ impl Catalog {
     }
 }
 
+const INVALID_EXPORT: &str = "Este arquivo não é uma exportação válida do HD Fantasma.";
+
+/// `file:` URI that opens `path` read-only and immutable (SQLite never writes or locks it).
+fn readonly_uri(path: &Path) -> Result<String> {
+    let abs = std::fs::canonicalize(path)?;
+    let mut uri = String::from("file:");
+    for ch in abs.to_string_lossy().chars() {
+        match ch {
+            '%' => uri.push_str("%25"),
+            '?' => uri.push_str("%3F"),
+            '#' => uri.push_str("%23"),
+            c => uri.push(c),
+        }
+    }
+    uri.push_str("?immutable=1");
+    Ok(uri)
+}
+
+/// An export comes from someone else's computer: check every value before copying it in.
+/// SQLite accepts any type in any column, so types are checked here; paths must stay inside
+/// the disk (relative, no `..`), and every parent must exist in the same file.
+fn validate_import(conn: &Connection) -> Result<()> {
+    let bad = |sql: &str| -> Result<bool> {
+        match conn.query_row(sql, [], |r| r.get::<_, i64>(0)) {
+            Ok(n) => Ok(n != 0),
+            Err(_) => Ok(true),
+        }
+    };
+    let disks = "SELECT COUNT(*) FROM imp.disks WHERE typeof(uuid)!='text' OR uuid='' OR typeof(name)!='text'
+         OR typeof(filesystem)!='text' OR typeof(last_read_at)!='text'
+         OR typeof(capacity_bytes)!='integer' OR capacity_bytes<0
+         OR typeof(free_bytes)!='integer' OR free_bytes<0
+         OR typeof(item_count)!='integer' OR item_count<0
+         OR typeof(total_bytes)!='integer' OR total_bytes<0";
+    let items = "SELECT COUNT(*) FROM imp.items WHERE typeof(id)!='integer' OR id<1
+         OR typeof(parent_id) NOT IN ('integer','null') OR parent_id=id
+         OR typeof(name)!='text' OR name='' OR instr(name,'/')>0 OR instr(name,char(0))>0
+         OR typeof(path)!='text' OR path='' OR instr(path,char(0))>0
+         OR path LIKE '/%' OR path='..' OR path LIKE '../%' OR path LIKE '%/../%' OR path LIKE '%/..'
+         OR typeof(kind)!='text'
+         OR typeof(ext) NOT IN ('text','null')
+         OR typeof(size_bytes)!='integer' OR size_bytes<0
+         OR typeof(child_count)!='integer' OR child_count<0
+         OR typeof(created_at) NOT IN ('text','null')
+         OR typeof(modified_at) NOT IN ('text','null')";
+    let orphans = "SELECT COUNT(*) FROM imp.items i WHERE i.parent_id IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM imp.items p WHERE p.id=i.parent_id)";
+    if bad(disks)? || bad(items)? || bad(orphans)? {
+        return Err(Error::msg(INVALID_EXPORT));
+    }
+    Ok(())
+}
+
 /// Recalcula `descendant_count` das pastas (de um disco, ou de todos com `None`):
 /// cada item soma 1 em todas as pastas acima dele.
 pub fn recompute_descendants(conn: &Connection, disk_id: Option<i64>) -> Result<()> {
@@ -460,9 +535,17 @@ pub fn recompute_descendants(conn: &Connection, disk_id: Option<i64>) -> Result<
         }
     }
     let mut count: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    // A healthy tree is never deeper than its number of items. More steps than that means a
+    // folder is its own ancestor (damaged or hostile file): stop instead of looping forever.
+    let max_steps = parent.len();
     for (_, p) in parent.iter() {
         let mut cur = *p;
+        let mut steps = 0usize;
         while let Some(pid) = cur {
+            steps += 1;
+            if steps > max_steps {
+                return Err(Error::msg(INVALID_EXPORT));
+            }
             *count.entry(pid).or_default() += 1;
             cur = parent.get(&pid).copied().flatten();
         }

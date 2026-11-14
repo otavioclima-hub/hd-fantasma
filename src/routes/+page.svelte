@@ -25,7 +25,9 @@
   onMount(() => {
     try {
       const saved = JSON.parse(localStorage.getItem("hdf-cols") ?? "null");
-      if (saved) { disksW = saved.disksW ?? disksW; inspW = saved.inspW ?? inspW; }
+      // Saved widths are only trusted if they are plain numbers in a sane range.
+      const width = (v: unknown, def: number) => (typeof v === "number" && Number.isFinite(v) ? Math.min(900, Math.max(120, Math.round(v))) : def);
+      if (saved && typeof saved === "object") { disksW = width(saved.disksW, disksW); inspW = width(saved.inspW, inspW); }
     } catch { /* sem armazenamento */ }
     init();
   });

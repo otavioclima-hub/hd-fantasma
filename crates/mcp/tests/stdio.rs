@@ -304,6 +304,14 @@ fn catalogar_e_plugados() {
     assert!(c.fail("catalogar_disco", json!({"disco": "Disco Que Nao Existe"})).contains("não é a raiz"));
     assert!(c.fail("catalogar_disco", json!({})).contains("Informe"));
     assert!(c.fail("catalogar_disco", json!({"disco": "x", "incluirOcultos": "sim"})).contains("verdadeiro"));
+    // o disco interno do computador nunca é lido pelo MCP (auditoria 2026-11-14)
+    if cfg!(target_os = "macos") {
+        assert!(c.fail("catalogar_disco", json!({"disco": "/"})).contains("disco interno"));
+        let t = c.fail("catalogar_disco", json!({"disco": "/System/Volumes/Data"}));
+        assert!(t.contains("disco interno") || t.contains("não é a raiz"), "{t}");
+        let internal = r["discos"].as_array().unwrap().iter().find(|d| d["caminhoMontagem"] == "/").unwrap();
+        assert_eq!(internal["podeCatalogar"], false);
+    }
     // nada foi gravado
     assert_eq!(c.ok("listar_discos", json!({}))["totalDiscos"], 2);
 }

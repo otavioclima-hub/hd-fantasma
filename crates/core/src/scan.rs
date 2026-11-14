@@ -271,7 +271,7 @@ fn process_job(sh: &Shared, job: &Job, tx: &SyncSender<Batch>, children: &mut Ve
         } else {
             rows.push(sh.make_file(e, rel, job.id));
             sh.bytes_seen.fetch_add(e.alloc, Ordering::Relaxed);
-            size += e.size;
+            size = size.saturating_add(e.size);
             count += 1;
             files += 1;
         }
@@ -433,7 +433,7 @@ impl<'a> Writer<'a> {
             Out::File(item) => {
                 self.insert(&item)?;
                 self.item_count += 1;
-                self.total_bytes += item.size_bytes;
+                self.total_bytes = self.total_bytes.saturating_add(item.size_bytes);
             }
         }
         Ok(())
@@ -553,14 +553,15 @@ impl<'a> Writer<'a> {
         let mut sub_items: HashMap<i64, u64> = HashMap::new();
         for &id in ids.iter().rev() {
             let a = &self.dirs[&id];
-            let total = a.size + sub.remove(&id).unwrap_or(0);
+            let total = a.size.saturating_add(sub.remove(&id).unwrap_or(0));
             let inside = a.count + sub_items.remove(&id).unwrap_or(0);
             if let Some(p) = a.parent {
-                *sub.entry(p).or_default() += total;
+                let e = sub.entry(p).or_default();
+                *e = e.saturating_add(total);
                 *sub_items.entry(p).or_default() += inside;
             }
             if total != 0 || a.count != 0 {
-                self.upd.execute(params![total as i64, a.count as i64, inside as i64, id])?;
+                self.upd.execute(params![total.min(i64::MAX as u64) as i64, a.count as i64, inside as i64, id])?;
             }
         }
         Ok(())
@@ -743,7 +744,7 @@ fn read_disk_inner(
     tx.execute("INSERT INTO items_fts(items_fts, rank) VALUES('automerge', 4)", [])?;
     tx.execute(
         "UPDATE disks SET item_count=?2, total_bytes=?3, last_read_at=?4 WHERE id=?1",
-        params![disk_id, item_count as i64, total_bytes as i64, now],
+        params![disk_id, item_count as i64, total_bytes.min(i64::MAX as u64) as i64, now],
     )?;
     tx.commit()?;
 

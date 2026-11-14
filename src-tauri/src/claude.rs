@@ -14,6 +14,19 @@ pub const SERVER_NAME: &str = "hd-fantasma";
 const CLI_TIMEOUT: Duration = Duration::from_secs(15);
 const MSG_BAD_JSON: &str = "O arquivo de configuração do Claude está com erro; não mexi nele.";
 const MSG_WRITE: &str = "Não consegui gravar a configuração do Claude.";
+const MSG_NOT_INSTALLED: &str = "Antes de conectar, arraste o HD Fantasma para a pasta Aplicativos e abra ele de lá.";
+
+/// The Claude apps will run whatever sits at the registered path, every time they start. So the
+/// path must be a real install: not the mounted installer image or any other removable disk
+/// (another disk with the same name could later put a different program there), and not the
+/// temporary copy macOS runs when an app is opened straight from Downloads.
+fn stable_install(mcp: &Path) -> Result<(), String> {
+    let p = mcp.to_string_lossy();
+    if p.starts_with("/Volumes/") || p.contains("/AppTranslocation/") {
+        return Err(MSG_NOT_INSTALLED.into());
+    }
+    Ok(())
+}
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -105,6 +118,14 @@ fn write_config(path: &Path, v: &Value) -> Result<(), String> {
     let res = (|| -> std::io::Result<()> {
         use std::io::Write;
         let mut f = std::fs::File::create(&tmp)?;
+        // This file can hold keys of other MCP servers: keep whatever protection it had, and
+        // make a brand-new one readable only by its owner.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(path).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
+            f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        }
         f.write_all(text.as_bytes())?;
         f.sync_all()?;
         std::fs::rename(&tmp, path)
@@ -313,6 +334,7 @@ pub fn connect(ctx: &Ctx, target: Option<&str>) -> Result<ClaudeStatus, String> 
 }
 
 fn connect_with(ctx: &Ctx, target: Option<&str>, timeout: Duration) -> Result<ClaudeStatus, String> {
+    stable_install(&ctx.mcp)?;
     let mut first_err: Option<String> = None;
     if matches!(target, None | Some("desktop")) {
         if ctx.desktop_dir().is_dir() {
@@ -470,6 +492,37 @@ mod tests {
         let none = d.path().join("nao-existe.json");
         desktop_disconnect(&none).unwrap();
         assert!(!none.exists());
+    }
+
+    #[test]
+    fn refuses_to_register_a_path_on_a_removable_disk() {
+        let d = TempDir::new().unwrap();
+        std::fs::create_dir_all(d.path().join("Library/Application Support/Claude")).unwrap();
+        for bad in [
+            "/Volumes/HD Fantasma/HD Fantasma.app/Contents/MacOS/hd-fantasma-mcp",
+            "/private/var/folders/ab/T/AppTranslocation/1234/d/HD Fantasma.app/Contents/MacOS/hd-fantasma-mcp",
+        ] {
+            let ctx = Ctx { home: d.path().to_path_buf(), appdata: None, mcp: PathBuf::from(bad) };
+            assert_eq!(connect_with(&ctx, None, Duration::from_secs(5)).unwrap_err(), MSG_NOT_INSTALLED);
+            assert!(!ctx.desktop_config().exists(), "gravou a configuração para {bad}");
+            // desconectar continua funcionando de qualquer lugar
+            assert!(disconnect_with(&ctx, None, Duration::from_secs(5)).is_ok());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keeps_config_file_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let d = TempDir::new().unwrap();
+        let c = cfg_in(&d);
+        desktop_connect(&c, MCP).unwrap();
+        assert_eq!(mode(&c), 0o600, "arquivo novo só o dono lê");
+        std::fs::write(&c, r#"{"mcpServers":{"b":{"command":"y","env":{"KEY":"segredo"}}}}"#).unwrap();
+        std::fs::set_permissions(&c, std::fs::Permissions::from_mode(0o640)).unwrap();
+        desktop_connect(&c, MCP).unwrap();
+        assert_eq!(mode(&c), 0o640, "permissão que já existia é mantida");
     }
 
     #[cfg(unix)]

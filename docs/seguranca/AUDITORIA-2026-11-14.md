@@ -2,6 +2,12 @@
 
 **Data:** 2026-11-14 · **Perfil:** rápido (`quick`) · **Escopo:** app inteiro (núcleo Rust, casca Tauri, telas Svelte, dependências, empacotamento), menos `crates/mcp`.
 
+> **Atualização (2026-11-14, depois da auditoria):** as duas falhas da seção 3 foram corrigidas, com testes em
+> `crates/core/tests/security.rs`. Também entraram os reforços 2, 4, 8 e 9 da seção 5 e, no MCP e no botão
+> "Conectar ao Claude" (criados depois desta rodada): o Claude não lê o disco interno, o botão não conecta com o app
+> rodando do instalador, a permissão do arquivo de configuração é mantida e há aviso de privacidade.
+> Continuam abertos: os demais reforços da seção 5 e as áreas da seção 7.
+
 ## 1. Como foi feita
 
 - Método: skill `security-audit` da Cloudflare, 6 fases. Ajudantes usados: 12 de 16 planejados (4 de mapeamento, 4 caçadores, 1 crítico, 3 verificadores independentes).
