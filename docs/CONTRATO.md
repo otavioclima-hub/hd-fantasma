@@ -1,0 +1,100 @@
+# Contrato motor ↔ telas (v1)
+
+Fonte única dos tipos e comandos entre `crates/core` + `src-tauri` (Rust) e `src/` (Svelte).
+Mudou aqui → mudar os dois lados. Nomes seguem `CONTEXT.md` (Disco, Item, Leitura...).
+JSON em camelCase (Rust usa `#[serde(rename_all = "camelCase")]`).
+
+## Tipos
+
+```ts
+type Kind = "folder" | "video" | "image" | "audio" | "document" | "archive" | "other";
+
+interface Disk {
+  id: number;            // id interno do catálogo
+  uuid: string;          // identidade do volume (ADR 0003)
+  name: string;          // nome do volume na última leitura
+  filesystem: string;    // "apfs", "hfs", "exfat", "msdos", "ntfs", "smbfs"...
+  capacityBytes: number;
+  freeBytes: number;
+  itemCount: number;
+  totalBytes: number;    // soma dos arquivos catalogados
+  lastReadAt: string;    // ISO 8601
+  present: boolean;      // está plugado agora?
+  mountPath: string | null; // onde está montado, se presente
+}
+
+interface Item {
+  id: number;
+  diskId: number;
+  parentId: number | null;   // null = raiz do disco
+  name: string;
+  path: string;              // caminho relativo à raiz do disco, com "/" ("Projetos/2025/a.mov")
+  kind: Kind;
+  ext: string | null;        // minúsculo, sem ponto
+  sizeBytes: number;         // pasta = soma recursiva
+  createdAt: string | null;
+  modifiedAt: string | null;
+  insideArchive: boolean;    // true = Conteúdo compactado
+  childCount: number;        // pastas e arquivos compactados; 0 nos demais
+  video: VideoInfo | null;
+}
+
+interface VideoInfo {
+  durationSec: number | null;
+  width: number | null;
+  height: number | null;
+  codec: string | null;      // "prores", "h264", "hevc"...
+  fps: number | null;
+}
+
+interface SearchQuery {
+  text: string;              // vazio = só filtros
+  kinds: Kind[];             // vazio = todos
+  minBytes: number | null;
+  maxBytes: number | null;
+  modifiedAfter: string | null;   // "2025-01-01"
+  modifiedBefore: string | null;
+  diskIds: number[];         // vazio = todos
+  limit: number;             // padrão 500
+  offset: number;
+}
+
+interface SearchResult { items: Item[]; total: number; }
+
+interface DuplicateGroup { name: string; sizeBytes: number; items: Item[]; }
+
+interface MountedVolume {    // disco presente que pode ser lido
+  uuid: string; name: string; mountPath: string; filesystem: string;
+  capacityBytes: number; freeBytes: number;
+  catalogedDiskId: number | null;  // já está no catálogo?
+}
+
+interface ReadOptions { mode: "quick" | "full"; includeHidden: boolean; }
+
+// evento "read-progress", emitido durante a Leitura
+interface ReadProgress {
+  diskUuid: string; phase: "listing" | "details" | "saving" | "done" | "error";
+  itemsSeen: number; currentPath: string | null; message: string | null;
+}
+```
+
+## Comandos Tauri (`invoke`)
+
+| Comando | Argumentos | Retorno |
+|---|---|---|
+| `list_disks` | — | `Disk[]` |
+| `list_mounted_volumes` | — | `MountedVolume[]` |
+| `read_disk` | `{ mountPath: string, options: ReadOptions }` | `Disk` (emite `read-progress`) |
+| `cancel_read` | — | `void` |
+| `list_children` | `{ diskId: number, parentId: number \| null }` | `Item[]` (pastas primeiro, depois nome) |
+| `get_item` | `{ id: number }` | `Item` |
+| `search` | `{ query: SearchQuery }` | `SearchResult` |
+| `find_duplicates` | `{ diskIds: number[], minBytes: number }` | `DuplicateGroup[]` |
+| `rename_disk` | `{ diskId: number, name: string }` | `void` |
+| `delete_disk` | `{ diskId: number }` | `void` (só apaga do catálogo) |
+| `export_disk` | `{ diskId: number, destPath: string }` | `void` |
+| `import_disk` | `{ srcPath: string }` | `Disk` |
+| `reveal_item` | `{ id: number }` | `void` (abre no Finder/Explorer se o disco estiver presente) |
+| `get_settings` / `set_settings` | `{ settings: { language: "pt" \| "en", includeHidden: boolean } }` | settings |
+
+Erros: string legível em pt-BR (ex.: `"O disco não está plugado."`).
