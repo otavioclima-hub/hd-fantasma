@@ -3,6 +3,7 @@
 
 pub mod db;
 pub mod error;
+pub mod extract;
 pub mod model;
 pub mod scan;
 pub mod search;
@@ -12,3 +13,4 @@ pub use db::Catalog;
 pub use error::{Error, Result};
 pub use model::*;
 pub use scan::{ArchiveEntry, DetailExtractor, Details, NoopExtractor, read_disk, read_disk_as};
+pub use extract::{RealExtractor, find_ffprobe};

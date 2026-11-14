@@ -322,3 +322,44 @@ fn settings_roundtrip_and_json_shape() {
     .unwrap();
     assert_eq!(sq.kinds, vec![Kind::Video]);
 }
+
+/// Extrator lento que pede cancelamento no meio: a Leitura inteira volta atrás.
+#[test]
+fn cancel_during_details_rolls_back() {
+    struct Cancelling<'a>(&'a AtomicBool);
+    impl DetailExtractor for Cancelling<'_> {
+        fn wants(&self, item: &Item) -> bool {
+            item.kind == Kind::Video
+        }
+        fn extract(&self, _p: &Path) -> Details {
+            self.0.store(true, Ordering::SeqCst);
+            Details::default()
+        }
+    }
+    let (_d, _s, mut cat, v) = setup();
+    let cancel = AtomicBool::new(false);
+    let r = read_disk_as(&mut cat, &v, &opts(ReadMode::Full, false), &Cancelling(&cancel), &cancel, &mut |_| {});
+    assert!(matches!(r, Err(Error::Cancelled)));
+    assert!(cat.list_disks(&[]).unwrap().is_empty() || cat.list_disks(&[]).unwrap()[0].item_count == 0);
+}
+
+/// Vários itens pendentes em paralelo: todos recebem seus detalhes.
+#[test]
+fn parallel_details_cover_all_items() {
+    let data = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    for i in 0..40 {
+        std::fs::write(data.path().join(format!("c{i}.mov")), vec![0u8; 10 + i]).unwrap();
+    }
+    let mut cat = Catalog::open(store.path().join("c.sqlite")).unwrap();
+    let v = MountedVolume {
+        uuid: "par".into(), name: "PAR".into(), mount_path: data.path().to_string_lossy().into(),
+        filesystem: "apfs".into(), capacity_bytes: 0, free_bytes: 0, cataloged_disk_id: None,
+    };
+    let fake = Fake { calls: AtomicUsize::new(0) };
+    let disk = scan(&mut cat, &v, ReadMode::Full, false, &fake);
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 40);
+    let kids = cat.list_children(disk.id, None).unwrap();
+    assert_eq!(kids.len(), 40);
+    assert!(kids.iter().all(|k| k.video.as_ref().and_then(|x| x.width) == Some(1920)));
+}

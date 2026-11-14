@@ -1,0 +1,6 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "telas-demo", "runtimeExecutable": "bash", "runtimeArgs": ["-lc", ". ~/.nvm/nvm.sh && npm run dev"], "port": 1420 }
+  ]
+}

@@ -11,7 +11,7 @@ use crate::model::*;
 use rusqlite::{Connection, Statement, params};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 // ------------------------------------------------------------ ponto de extensão
@@ -150,6 +150,8 @@ struct Walker<'a> {
     cancel: &'a AtomicBool,
     progress: &'a mut dyn FnMut(ReadProgress),
     old: HashMap<String, OldInfo>,
+    /// Itens novos/alterados que precisam do trabalho caro; feito em paralelo depois da listagem.
+    pending: Vec<Pending>,
     next_id: i64,
     seen: u64,
     skipped: u64,
@@ -158,6 +160,14 @@ struct Walker<'a> {
     phase: Phase,
     last_emit: Instant,
 }
+
+struct Pending {
+    item: Item,
+    full: PathBuf,
+}
+
+/// Quantos itens o extrator processa ao mesmo tempo (ffprobe / abrir .zip e .rar).
+const DETAIL_WORKERS: usize = 4;
 
 struct Node {
     name: String,
@@ -356,13 +366,7 @@ impl<'a> Walker<'a> {
                 }
             }
         }
-        if !reused && self.extractor.wants(&item) {
-            self.phase = Phase::Details;
-            let d = self.extractor.extract(&full);
-            self.phase = Phase::Listing;
-            item.video = d.video.filter(|v| !v.is_empty());
-            entries = d.archive_entries;
-        }
+        let wants = !reused && self.extractor.wants(&item);
 
         let nodes = build_tree(&entries);
         item.child_count = nodes.iter().filter(|n| n.parent.is_none()).count() as u64;
@@ -371,6 +375,106 @@ impl<'a> Walker<'a> {
         self.total_bytes += item.size_bytes;
         if !nodes.is_empty() {
             self.insert_archive_nodes(&item, &nodes)?;
+        }
+        if wants {
+            // O trabalho caro roda depois da listagem, em paralelo (ver `run_details`).
+            self.pending.push(Pending { item, full });
+        }
+        Ok(())
+    }
+
+    /// Roda o extrator nos itens pendentes com um pequeno grupo de threads e grava cada
+    /// resultado na mesma transação (só a thread principal mexe no banco).
+    fn run_details(&mut self) -> Result<()> {
+        let pending = std::mem::take(&mut self.pending);
+        let total = pending.len();
+        if total == 0 {
+            return Ok(());
+        }
+        self.phase = Phase::Details;
+        self.emit(None, Some(format!("Lendo detalhes: 0 de {total}")));
+
+        let extractor = self.extractor;
+        let cancel = self.cancel;
+        let stop = AtomicBool::new(false);
+        let next = AtomicUsize::new(0);
+        let workers = DETAIL_WORKERS.min(total);
+        let mut outcome: Result<()> = Ok(());
+
+        std::thread::scope(|scope| {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Details)>(workers * 2);
+            for _ in 0..workers {
+                let tx = tx.clone();
+                let (pending, next, stop) = (&pending, &next, &stop);
+                scope.spawn(move || {
+                    loop {
+                        if stop.load(Ordering::Relaxed) || cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(p) = pending.get(i) else { break };
+                        let d = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            extractor.extract(&p.full)
+                        }))
+                        .unwrap_or_default();
+                        if tx.send((i, d)).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            drop(tx);
+
+            let mut done = 0usize;
+            for (i, d) in rx.iter() {
+                if cancel.load(Ordering::Relaxed) {
+                    outcome = Err(Error::Cancelled);
+                    break;
+                }
+                if let Err(e) = self.apply_details(&pending[i].item, d) {
+                    outcome = Err(e);
+                    break;
+                }
+                done += 1;
+                if self.last_emit.elapsed() >= Duration::from_millis(200) || done == total {
+                    let path = pending[i].item.path.clone();
+                    self.emit(Some(&path), Some(format!("Lendo detalhes: {done} de {total}")));
+                }
+            }
+            if outcome.is_ok() && done < total {
+                // Os trabalhadores pararam por cancelamento.
+                outcome = Err(Error::Cancelled);
+            }
+            stop.store(true, Ordering::Relaxed);
+            drop(rx); // destrava quem estiver esperando para enviar
+        });
+        outcome
+    }
+
+    fn apply_details(&mut self, item: &Item, d: Details) -> Result<()> {
+        let video = d.video.filter(|v| !v.is_empty());
+        let nodes = build_tree(&d.archive_entries);
+        let roots = nodes.iter().filter(|n| n.parent.is_none()).count() as i64;
+        if video.is_none() && nodes.is_empty() {
+            return Ok(());
+        }
+        let v = video.as_ref();
+        self.conn
+            .prepare_cached(
+                "UPDATE items SET child_count=?2, video_duration=?3, video_width=?4,
+                    video_height=?5, video_codec=?6, video_fps=?7 WHERE id=?1",
+            )?
+            .execute(params![
+                item.id,
+                roots,
+                v.and_then(|v| v.duration_sec),
+                v.and_then(|v| v.width),
+                v.and_then(|v| v.height),
+                v.and_then(|v| v.codec.clone()),
+                v.and_then(|v| v.fps),
+            ])?;
+        if !nodes.is_empty() {
+            self.insert_archive_nodes(item, &nodes)?;
         }
         Ok(())
     }
@@ -634,6 +738,7 @@ pub fn read_disk_as(
             cancel,
             progress: &mut *progress,
             old,
+            pending: Vec::new(),
             next_id: first_new_id,
             seen: 0,
             skipped: 0,
@@ -645,6 +750,7 @@ pub fn read_disk_as(
         w.emit(None, None);
         let root_path = w.root.clone();
         w.walk_dir(&root_path, "", None)?;
+        w.run_details()?;
         w.phase = Phase::Saving;
         w.emit(None, None);
         item_count = w.item_count;
