@@ -363,3 +363,160 @@ fn parallel_details_cover_all_items() {
     assert_eq!(kids.len(), 40);
     assert!(kids.iter().all(|k| k.video.as_ref().and_then(|x| x.width) == Some(1920)));
 }
+
+// ------------------------------------------------------- leitura em paralelo (ADR 0012)
+
+use std::collections::BTreeMap;
+
+/// Árvore de ~6,8 mil arquivos, 6 níveis, com pastas vazias e tamanhos variados.
+fn make_big_tree(root: &Path) -> usize {
+    fn rec(dir: &Path, depth: usize, n: &mut usize) {
+        fs::create_dir_all(dir).unwrap();
+        for f in 0..5 {
+            *n += 1;
+            let ext = ["mov", "txt", "zip", "jpg", "dat"][f];
+            fs::write(dir.join(format!("f{f}-{n}.{ext}")), vec![b'x'; (*n * 7) % 300]).unwrap();
+        }
+        if depth < 6 {
+            for c in 0..4 {
+                rec(&dir.join(format!("d{depth}_{c}")), depth + 1, n);
+            }
+        }
+        if depth == 3 {
+            fs::create_dir_all(dir.join("vazia")).unwrap();
+        }
+    }
+    let mut n = 0;
+    rec(root, 1, &mut n);
+    n
+}
+
+/// Percurso de referência, simples e sequencial: caminho -> (tipo, tamanho recursivo, filhos).
+fn reference(dir: &Path, rel: &str, out: &mut BTreeMap<String, (String, u64, u64)>) -> (u64, u64) {
+    let (mut size, mut count) = (0, 0);
+    for e in fs::read_dir(dir).unwrap() {
+        let e = e.unwrap();
+        let name = e.file_name().to_string_lossy().into_owned();
+        let r = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+        let md = e.metadata().unwrap();
+        count += 1;
+        if md.is_dir() {
+            let (s, c) = reference(&e.path(), &r, out);
+            out.insert(r, ("folder".into(), s, c));
+            size += s;
+        } else {
+            let kind = Kind::from_ext(Path::new(&name).extension().map(|x| x.to_string_lossy().to_lowercase()).as_deref());
+            out.insert(r, (kind.as_str().into(), md.len(), 0));
+            size += md.len();
+        }
+    }
+    (size, count)
+}
+
+fn catalog_rows(path: &Path) -> (BTreeMap<String, (String, u64, u64)>, i64, i64) {
+    let c = rusqlite::Connection::open(path).unwrap();
+    let mut st = c
+        .prepare("SELECT i.path, i.kind, i.size_bytes, i.child_count, p.path, i.parent_id FROM items i LEFT JOIN items p ON p.id=i.parent_id")
+        .unwrap();
+    let mut m = BTreeMap::new();
+    let rows = st
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)? as u64,
+                r.get::<_, i64>(3)? as u64,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<i64>>(5)?,
+            ))
+        })
+        .unwrap();
+    for r in rows {
+        let (path, kind, size, cc, parent_path, parent_id) = r.unwrap();
+        // pai certo: o caminho do pai é o caminho do filho sem o último pedaço
+        let expect = path.rsplit_once('/').map(|x| x.0.to_string());
+        assert_eq!(parent_path, expect, "pai errado para {path}");
+        assert_eq!(parent_id.is_some(), expect.is_some());
+        m.insert(path, (kind, size, cc));
+    }
+    let items: i64 = c.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+    let fts: i64 = c.query_row("SELECT COUNT(*) FROM items_fts", [], |r| r.get(0)).unwrap();
+    (m, items, fts)
+}
+
+#[test]
+fn parallel_walk_matches_reference_walk() {
+    let data = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let files = make_big_tree(data.path());
+    assert!(files > 5000);
+    let mut expected = BTreeMap::new();
+    let (total, _) = reference(data.path(), "", &mut expected);
+
+    let dbp = store.path().join("c.sqlite");
+    let mut cat = Catalog::open(&dbp).unwrap();
+    let v = vol(data.path(), "big");
+    let disk = scan(&mut cat, &v, ReadMode::Full, false, &NoopExtractor);
+    assert_eq!(disk.item_count as usize, expected.len());
+    assert_eq!(disk.total_bytes, total);
+    let (rows, items, fts) = catalog_rows(&dbp);
+    assert_eq!(rows, expected, "catálogo difere do percurso de referência");
+    assert_eq!(items, fts, "índice de busca completo");
+
+    // Busca funciona depois da leitura, e depois da atualização rápida.
+    let n1 = cat.search(&q("f3-")).unwrap().total;
+    assert!(n1 > 1000);
+    let disk2 = scan(&mut cat, &v, ReadMode::Quick, false, &NoopExtractor);
+    assert_eq!(disk2.item_count, disk.item_count);
+    let (rows2, items2, fts2) = catalog_rows(&dbp);
+    assert_eq!(rows2, expected);
+    assert_eq!((items2, fts2), (items, fts));
+    assert_eq!(cat.search(&q("f3-")).unwrap().total, n1);
+
+    // Com 1 thread e com muitas o resultado é o mesmo.
+    for n in [1, 40] {
+        let cancel = AtomicBool::new(false);
+        let disk3 = read_disk_threads(&mut cat, &v, &opts(ReadMode::Full, false), &NoopExtractor, &cancel, &mut |_| {}, n)
+            .unwrap();
+        assert_eq!(disk3.item_count, disk.item_count);
+        assert_eq!(catalog_rows(&dbp).0, expected);
+    }
+}
+
+/// Cancelar no meio da listagem (as threads leitoras já rodando) desfaz tudo.
+#[test]
+fn cancel_mid_walk_rolls_back() {
+    struct CancelAfter<'a> {
+        cancel: &'a AtomicBool,
+        calls: AtomicUsize,
+    }
+    impl DetailExtractor for CancelAfter<'_> {
+        fn wants(&self, _item: &Item) -> bool {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 800 {
+                self.cancel.store(true, Ordering::SeqCst);
+            }
+            false
+        }
+        fn extract(&self, _p: &Path) -> Details {
+            Details::default()
+        }
+    }
+    let data = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    make_big_tree(data.path());
+    let dbp = store.path().join("c.sqlite");
+    let mut cat = Catalog::open(&dbp).unwrap();
+    let v = vol(data.path(), "cancel");
+    let cancel = AtomicBool::new(false);
+    let ex = CancelAfter { cancel: &cancel, calls: AtomicUsize::new(0) };
+    let r = read_disk_as(&mut cat, &v, &opts(ReadMode::Full, false), &ex, &cancel, &mut |_| {});
+    assert!(matches!(r, Err(Error::Cancelled)));
+    assert!(ex.calls.load(Ordering::SeqCst) > 800);
+    assert!(cat.list_disks(&[]).unwrap().is_empty(), "nada ficou gravado");
+    let (rows, items, fts) = catalog_rows(&dbp);
+    assert!(rows.is_empty() && items == 0 && fts == 0);
+
+    // Depois do cancelamento uma leitura normal funciona.
+    let disk = scan(&mut cat, &v, ReadMode::Full, false, &NoopExtractor);
+    assert!(disk.item_count > 5000);
+}

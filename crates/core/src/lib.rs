@@ -4,6 +4,7 @@
 pub mod db;
 pub mod error;
 pub mod extract;
+pub mod fastdir;
 pub mod model;
 pub mod scan;
 pub mod search;
@@ -12,5 +13,5 @@ pub mod volumes;
 pub use db::Catalog;
 pub use error::{Error, Result};
 pub use model::*;
-pub use scan::{ArchiveEntry, DetailExtractor, Details, NoopExtractor, read_disk, read_disk_as};
+pub use scan::{ArchiveEntry, DetailExtractor, Details, NoopExtractor, read_disk, read_disk_as, read_disk_threads};
 pub use extract::{RealExtractor, find_ffprobe};

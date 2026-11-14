@@ -4,14 +4,25 @@
 //! fica exatamente como estava. Os itens vão direto para o banco (streaming), então
 //! discos com milhões de itens não esgotam a memória: só o que é caro de recalcular
 //! (dados de vídeo / conteúdo compactado) é guardado em memória na Atualização rápida.
+//!
+//! Desenho (ADR 0011 e 0012): várias threads "leitoras" tiram pastas de uma fila
+//! compartilhada, listam cada uma (`fastdir::list_dir`) e devolvem as pastas filhas à fila.
+//! Os ids dos itens saem de um contador atômico, então o pai já é conhecido quando o filho
+//! nasce. Os resultados seguem por um canal limitado até UMA thread escritora (a que chama
+//! `read_disk_as`), a única que mexe no SQLite. Tamanho e contagem das pastas são somados
+//! no fim, em memória (só as pastas, não os arquivos), e o índice de busca (FTS5) é
+//! montado de uma vez depois de tudo.
 
 use crate::db::{Catalog, normalize, now_iso};
 use crate::error::{Error, Result};
+use crate::fastdir::{self, Entry as DirEntry};
 use crate::model::*;
 use rusqlite::{Connection, Statement, params};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{RecvTimeoutError, SyncSender};
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 // ------------------------------------------------------------ ponto de extensão
@@ -99,30 +110,11 @@ pub fn iso_from_unix(secs: i64) -> String {
     )
 }
 
-fn iso(t: std::io::Result<std::time::SystemTime>) -> Option<String> {
-    let t = t.ok()?;
-    let secs = match t.duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => d.as_secs() as i64,
-        Err(e) => -(e.duration().as_secs() as i64),
-    };
-    Some(iso_from_unix(secs))
-}
-
 fn ext_of(name: &str) -> Option<String> {
     Path::new(name)
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .filter(|e| !e.is_empty())
-}
-
-#[cfg(unix)]
-fn dev_of(md: &std::fs::Metadata) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt;
-    Some(md.dev())
-}
-#[cfg(not(unix))]
-fn dev_of(_md: &std::fs::Metadata) -> Option<u64> {
-    None
 }
 
 // ---------------------------------------------------------------- Leitura
@@ -135,32 +127,6 @@ struct OldInfo {
     child_count: u64,
 }
 
-struct Walker<'a> {
-    conn: &'a Connection,
-    ins: Statement<'a>,
-    ins_fts: Statement<'a>,
-    upd: Statement<'a>,
-    disk_id: i64,
-    uuid: String,
-    root: PathBuf,
-    include_hidden: bool,
-    is_slash: bool,
-    allowed_devs: Vec<u64>,
-    extractor: &'a dyn DetailExtractor,
-    cancel: &'a AtomicBool,
-    progress: &'a mut dyn FnMut(ReadProgress),
-    old: HashMap<String, OldInfo>,
-    /// Itens novos/alterados que precisam do trabalho caro; feito em paralelo depois da listagem.
-    pending: Vec<Pending>,
-    next_id: i64,
-    seen: u64,
-    skipped: u64,
-    item_count: u64,
-    total_bytes: u64,
-    phase: Phase,
-    last_emit: Instant,
-}
-
 struct Pending {
     item: Item,
     full: PathBuf,
@@ -168,6 +134,19 @@ struct Pending {
 
 /// Quantos itens o extrator processa ao mesmo tempo (ffprobe / abrir .zip e .rar).
 const DETAIL_WORKERS: usize = 4;
+
+/// Itens por lote enviado ao escritor.
+const BATCH_ROWS: usize = 2000;
+
+/// Quantas pastas são listadas ao mesmo tempo. Em pastas de nuvem cada listagem espera a
+/// rede, então mais threads que núcleos ajudam; `HDF_WALK_THREADS` força outro valor.
+fn walk_threads() -> usize {
+    if let Some(n) = std::env::var("HDF_WALK_THREADS").ok().and_then(|v| v.parse::<usize>().ok()) {
+        return n.clamp(1, 128);
+    }
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    (cores * 2).clamp(4, 16)
+}
 
 struct Node {
     name: String,
@@ -179,7 +158,257 @@ struct Node {
     children: u64,
 }
 
-impl<'a> Walker<'a> {
+/// Decide se o extrator caro pode rodar num item. Arquivo que só existe na nuvem
+/// (`dataless`) NUNCA passa por ele: ffprobe ou abrir o compactado baixaria o arquivo
+/// inteiro (ADR 0011). Vale também na Atualização rápida.
+pub(crate) fn should_extract(
+    extractor: &dyn DetailExtractor,
+    item: &Item,
+    dataless: bool,
+    reused: bool,
+) -> bool {
+    !reused && !dataless && extractor.wants(item)
+}
+
+/// Dados de só leitura compartilhados pelas threads leitoras.
+struct Shared<'a> {
+    disk_id: i64,
+    include_hidden: bool,
+    is_slash: bool,
+    allowed_devs: Vec<u64>,
+    extractor: &'a dyn DetailExtractor,
+    cancel: &'a AtomicBool,
+    /// Pedido de parada interno (erro ou cancelamento no escritor).
+    stop: AtomicBool,
+    old: HashMap<String, OldInfo>,
+    next_id: &'a AtomicI64,
+    skipped: AtomicU64,
+}
+
+impl Shared<'_> {
+    fn alloc(&self) -> i64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed) || self.cancel.load(Ordering::Relaxed)
+    }
+
+    fn skip_dir(&self, rel: &str, dev: Option<u64>) -> bool {
+        if self.is_slash && ROOT_SYSTEM_DIRS.contains(&rel) {
+            return true;
+        }
+        // Não atravessa para outro volume montado.
+        if let Some(d) = dev {
+            if !self.allowed_devs.is_empty() && !self.allowed_devs.contains(&d) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Monta a linha de um arquivo (na Atualização rápida reaproveita o que não mudou).
+    fn make_file(&self, e: &DirEntry, dir: &Path, rel: String, parent: Option<i64>) -> Out {
+        let ext = ext_of(&e.name);
+        let kind = Kind::from_ext(ext.as_deref());
+        let mut item = Item {
+            id: self.alloc(),
+            disk_id: self.disk_id,
+            parent_id: parent,
+            name: e.name.clone(),
+            path: rel,
+            kind,
+            ext,
+            size_bytes: e.size,
+            created_at: e.created.map(iso_from_unix),
+            modified_at: e.modified.map(iso_from_unix),
+            inside_archive: false,
+            child_count: 0,
+            video: None,
+        };
+        let mut reuse_archive = None;
+        let mut reused = false;
+        if let Some(o) = self.old.get(&item.path) {
+            if o.size == item.size_bytes && o.modified == item.modified_at {
+                let has_video = o.video.is_some();
+                let has_archive = kind == Kind::Archive && o.child_count > 0;
+                if has_video || has_archive {
+                    reused = true;
+                    item.video = o.video.clone();
+                    if has_archive {
+                        reuse_archive = Some(o.id);
+                    }
+                }
+            }
+        }
+        let full = if should_extract(self.extractor, &item, e.dataless, reused) {
+            Some(e.path_in(dir))
+        } else {
+            None
+        };
+        Out::File { item, full, reuse_archive }
+    }
+}
+
+struct Job {
+    dir: PathBuf,
+    rel: String,
+    /// Id da própria pasta (None = raiz do disco, que não é um item).
+    id: Option<i64>,
+}
+
+struct QState {
+    jobs: VecDeque<Job>,
+    /// Pastas sendo listadas agora; a fila só acaba quando está vazia E ninguém trabalha.
+    active: usize,
+}
+
+struct Queue {
+    st: Mutex<QState>,
+    cv: Condvar,
+}
+
+impl Queue {
+    fn lock(&self) -> std::sync::MutexGuard<'_, QState> {
+        self.st.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+enum Out {
+    Folder(Item),
+    File { item: Item, full: Option<PathBuf>, reuse_archive: Option<i64> },
+}
+
+struct Batch {
+    rows: Vec<Out>,
+    /// (id da pasta, soma dos arquivos diretos, nº de filhos diretos) quando a pasta acabou.
+    agg: Option<(i64, u64, u64)>,
+}
+
+/// Lista uma pasta e devolve as pastas filhas a visitar. `false` = parar (receptor sumiu).
+fn process_job(sh: &Shared, job: &Job, tx: &SyncSender<Batch>, children: &mut Vec<Job>) -> bool {
+    let Some(listing) = fastdir::list_dir(&job.dir) else {
+        sh.skipped.fetch_add(1, Ordering::Relaxed);
+        return true;
+    };
+    sh.skipped.fetch_add(listing.skipped, Ordering::Relaxed);
+    let (mut size, mut count) = (0u64, 0u64);
+    let mut rows: Vec<Out> = Vec::with_capacity(listing.entries.len().min(BATCH_ROWS));
+    for e in &listing.entries {
+        if !sh.include_hidden && is_ignored(&e.name) {
+            continue;
+        }
+        let rel = if job.rel.is_empty() { e.name.clone() } else { format!("{}/{}", job.rel, e.name) };
+        if e.is_dir {
+            if sh.skip_dir(&rel, e.dev) {
+                continue;
+            }
+            let id = sh.alloc();
+            rows.push(Out::Folder(Item {
+                id,
+                disk_id: sh.disk_id,
+                parent_id: job.id,
+                name: e.name.clone(),
+                path: rel.clone(),
+                kind: Kind::Folder,
+                ext: None,
+                size_bytes: 0,
+                created_at: e.created.map(iso_from_unix),
+                modified_at: e.modified.map(iso_from_unix),
+                inside_archive: false,
+                child_count: 0,
+                video: None,
+            }));
+            children.push(Job { dir: e.path_in(&job.dir), rel, id: Some(id) });
+            count += 1;
+        } else {
+            rows.push(sh.make_file(e, &job.dir, rel, job.id));
+            size += e.size;
+            count += 1;
+        }
+        if rows.len() >= BATCH_ROWS {
+            if sh.stopped() {
+                return false;
+            }
+            let full = std::mem::replace(&mut rows, Vec::with_capacity(BATCH_ROWS));
+            if tx.send(Batch { rows: full, agg: None }).is_err() {
+                return false;
+            }
+        }
+    }
+    let agg = job.id.map(|id| (id, size, count));
+    tx.send(Batch { rows, agg }).is_ok()
+}
+
+fn worker(sh: &Shared, q: &Queue, tx: SyncSender<Batch>) {
+    loop {
+        let job = {
+            let mut g = q.lock();
+            loop {
+                if sh.stopped() {
+                    return;
+                }
+                if let Some(j) = g.jobs.pop_front() {
+                    g.active += 1;
+                    break j;
+                }
+                if g.active == 0 {
+                    return;
+                }
+                g = q.cv.wait_timeout(g, Duration::from_millis(100)).unwrap_or_else(|e| e.into_inner()).0;
+            }
+        };
+        let mut children = Vec::new();
+        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            process_job(sh, &job, &tx, &mut children)
+        }))
+        .unwrap_or_else(|_| {
+            sh.skipped.fetch_add(1, Ordering::Relaxed);
+            true
+        });
+        {
+            // As pastas filhas só entram na fila DEPOIS de enviadas as linhas desta pasta,
+            // então o escritor sempre vê a pasta antes do conteúdo dela.
+            let mut g = q.lock();
+            g.jobs.extend(children);
+            g.active -= 1;
+        }
+        q.cv.notify_all();
+        if !ok {
+            return;
+        }
+    }
+}
+
+#[derive(Default)]
+struct DirAgg {
+    parent: Option<i64>,
+    size: u64,
+    count: u64,
+}
+
+/// A thread escritora: dona da conexão SQLite.
+struct Writer<'a> {
+    conn: &'a Connection,
+    ins: Statement<'a>,
+    upd: Statement<'a>,
+    disk_id: i64,
+    uuid: String,
+    extractor: &'a dyn DetailExtractor,
+    cancel: &'a AtomicBool,
+    progress: &'a mut dyn FnMut(ReadProgress),
+    next_id: &'a AtomicI64,
+    /// Itens novos/alterados que precisam do trabalho caro; feito em paralelo depois da listagem.
+    pending: Vec<Pending>,
+    dirs: HashMap<i64, DirAgg>,
+    seen: u64,
+    item_count: u64,
+    total_bytes: u64,
+    phase: Phase,
+    last_emit: Instant,
+}
+
+impl<'a> Writer<'a> {
     fn emit(&mut self, path: Option<&str>, message: Option<String>) {
         self.last_emit = Instant::now();
         (self.progress)(ReadProgress {
@@ -189,17 +418,6 @@ impl<'a> Walker<'a> {
             current_path: path.map(|s| s.to_string()),
             message,
         });
-    }
-
-    fn tick(&mut self, rel: &str) -> Result<()> {
-        if self.cancel.load(Ordering::Relaxed) {
-            return Err(Error::Cancelled);
-        }
-        self.seen += 1;
-        if self.last_emit.elapsed() >= Duration::from_millis(200) {
-            self.emit(Some(rel), None);
-        }
-        Ok(())
     }
 
     fn insert(&mut self, it: &Item) -> Result<()> {
@@ -223,162 +441,127 @@ impl<'a> Walker<'a> {
             v.and_then(|v| v.codec.clone()),
             v.and_then(|v| v.fps),
         ])?;
-        self.ins_fts.execute(params![it.id, normalize(&it.name)])?;
         Ok(())
     }
 
-    fn alloc(&mut self) -> i64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
-    }
-
-    fn skip_dir(&self, rel: &str, md: &std::fs::Metadata) -> bool {
-        if self.is_slash && ROOT_SYSTEM_DIRS.contains(&rel) {
-            return true;
-        }
-        // Não atravessa para outro volume montado.
-        if let Some(d) = dev_of(md) {
-            if !self.allowed_devs.is_empty() && !self.allowed_devs.contains(&d) {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Percorre uma pasta; devolve (tamanho recursivo, nº de filhos diretos).
-    fn walk_dir(&mut self, dir: &Path, rel: &str, parent: Option<i64>) -> Result<(u64, u64)> {
-        if self.cancel.load(Ordering::Relaxed) {
-            return Err(Error::Cancelled);
-        }
-        let rd = match std::fs::read_dir(dir) {
-            Ok(r) => r,
-            Err(_) => {
-                self.skipped += 1;
-                return Ok((0, 0));
-            }
-        };
-        let (mut size, mut count) = (0u64, 0u64);
-        for entry in rd {
-            let Ok(entry) = entry else {
-                self.skipped += 1;
-                continue;
-            };
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !self.include_hidden && is_ignored(&name) {
-                continue;
-            }
-            let Ok(ft) = entry.file_type() else {
-                self.skipped += 1;
-                continue;
-            };
-            if ft.is_symlink() {
-                continue;
-            }
-            let Ok(md) = entry.metadata() else {
-                self.skipped += 1;
-                continue;
-            };
-            let child_rel = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
-            if ft.is_dir() {
-                if self.skip_dir(&child_rel, &md) {
-                    continue;
-                }
-                self.tick(&child_rel)?;
-                let id = self.alloc();
-                let mut folder = Item {
-                    id,
-                    disk_id: self.disk_id,
-                    parent_id: parent,
-                    name,
-                    path: child_rel.clone(),
-                    kind: Kind::Folder,
-                    ext: None,
-                    size_bytes: 0,
-                    created_at: iso(md.created()),
-                    modified_at: iso(md.modified()),
-                    inside_archive: false,
-                    child_count: 0,
-                    video: None,
-                };
-                self.insert(&folder)?;
+    fn apply(&mut self, out: Out) -> Result<()> {
+        match out {
+            Out::Folder(item) => {
+                self.insert(&item)?;
                 self.item_count += 1;
-                let (s, c) = self.walk_dir(&entry.path(), &child_rel, Some(id))?;
-                if s != 0 || c != 0 {
-                    folder.size_bytes = s;
-                    folder.child_count = c;
-                    self.upd.execute(params![s as i64, c as i64, id])?;
+                self.dirs.entry(item.id).or_default().parent = item.parent_id;
+            }
+            Out::File { mut item, full, reuse_archive } => {
+                let entries = match reuse_archive {
+                    Some(oid) => self.old_archive_entries(oid, &item.path)?,
+                    None => Vec::new(),
+                };
+                let nodes = build_tree(&entries);
+                item.child_count = nodes.iter().filter(|n| n.parent.is_none()).count() as u64;
+                self.insert(&item)?;
+                self.item_count += 1;
+                self.total_bytes += item.size_bytes;
+                if !nodes.is_empty() {
+                    self.insert_archive_nodes(&item, &nodes)?;
                 }
-                size += s;
-                count += 1;
-            } else if ft.is_file() {
-                self.tick(&child_rel)?;
-                self.file(entry.path(), name, child_rel, parent, &md)?;
-                size += md.len();
-                count += 1;
+                if let Some(full) = full {
+                    // O trabalho caro roda depois da listagem, em paralelo (ver `run_details`).
+                    self.pending.push(Pending { item, full });
+                }
             }
         }
-        Ok((size, count))
+        Ok(())
     }
 
-    fn file(
-        &mut self,
-        full: PathBuf,
-        name: String,
-        rel: String,
-        parent: Option<i64>,
-        md: &std::fs::Metadata,
-    ) -> Result<()> {
-        let ext = ext_of(&name);
-        let kind = Kind::from_ext(ext.as_deref());
-        let id = self.alloc();
-        let modified_at = iso(md.modified());
-        let mut item = Item {
-            id,
-            disk_id: self.disk_id,
-            parent_id: parent,
-            name,
-            path: rel,
-            kind,
-            ext,
-            size_bytes: md.len(),
-            created_at: iso(md.created()),
-            modified_at,
-            inside_archive: false,
-            child_count: 0,
-            video: None,
+    /// Lista o disco com várias threads; esta thread grava o que chega.
+    fn run_listing(&mut self, sh: &Shared, root: &Path, workers: usize) -> Result<()> {
+        let q = Queue {
+            st: Mutex::new(QState {
+                jobs: VecDeque::from([Job { dir: root.to_path_buf(), rel: String::new(), id: None }]),
+                active: 0,
+            }),
+            cv: Condvar::new(),
         };
-
-        // Atualização rápida: reaproveita o que já foi calculado se nada mudou.
-        let mut entries: Vec<ArchiveEntry> = Vec::new();
-        let mut reused = false;
-        if let Some(o) = self.old.get(&item.path) {
-            if o.size == item.size_bytes && o.modified == item.modified_at {
-                let has_video = o.video.is_some();
-                let has_archive = kind == Kind::Archive && o.child_count > 0;
-                if has_video || has_archive {
-                    reused = true;
-                    item.video = o.video.clone();
-                    if has_archive {
-                        let (oid, opath) = (o.id, item.path.clone());
-                        entries = self.old_archive_entries(oid, &opath)?;
+        let mut outcome: Result<()> = Ok(());
+        std::thread::scope(|scope| {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Batch>(workers * 4);
+            for _ in 0..workers {
+                let tx = tx.clone();
+                let q = &q;
+                scope.spawn(move || worker(sh, q, tx));
+            }
+            drop(tx);
+            loop {
+                match rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(batch) => {
+                        if self.cancel.load(Ordering::Relaxed) {
+                            outcome = Err(Error::Cancelled);
+                            break;
+                        }
+                        let mut last: Option<String> = None;
+                        if let Some(o) = batch.rows.last() {
+                            last = Some(match o {
+                                Out::Folder(i) => i.path.clone(),
+                                Out::File { item, .. } => item.path.clone(),
+                            });
+                        }
+                        self.seen += batch.rows.len() as u64;
+                        for out in batch.rows {
+                            if let Err(e) = self.apply(out) {
+                                outcome = Err(e);
+                                break;
+                            }
+                        }
+                        if outcome.is_err() {
+                            break;
+                        }
+                        if let Some((id, size, count)) = batch.agg {
+                            let a = self.dirs.entry(id).or_default();
+                            a.size = size;
+                            a.count = count;
+                        }
+                        if self.last_emit.elapsed() >= Duration::from_millis(200) {
+                            self.emit(last.as_deref(), None);
+                        }
                     }
+                    Err(RecvTimeoutError::Timeout) => {
+                        if self.cancel.load(Ordering::Relaxed) {
+                            outcome = Err(Error::Cancelled);
+                            break;
+                        }
+                        if self.last_emit.elapsed() >= Duration::from_millis(200) {
+                            self.emit(None, None);
+                        }
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
                 }
             }
+            sh.stop.store(true, Ordering::Relaxed);
+            q.cv.notify_all();
+            drop(rx); // destrava quem estiver esperando para enviar
+        });
+        if outcome.is_ok() && self.cancel.load(Ordering::Relaxed) {
+            outcome = Err(Error::Cancelled);
         }
-        let wants = !reused && self.extractor.wants(&item);
+        outcome
+    }
 
-        let nodes = build_tree(&entries);
-        item.child_count = nodes.iter().filter(|n| n.parent.is_none()).count() as u64;
-        self.insert(&item)?;
-        self.item_count += 1;
-        self.total_bytes += item.size_bytes;
-        if !nodes.is_empty() {
-            self.insert_archive_nodes(&item, &nodes)?;
-        }
-        if wants {
-            // O trabalho caro roda depois da listagem, em paralelo (ver `run_details`).
-            self.pending.push(Pending { item, full });
+    /// Soma tamanho e nº de filhos das pastas, de baixo para cima. Um filho sempre tem id
+    /// maior que o do pai (o pai nasce antes de a pasta ser listada), então basta andar
+    /// os ids do maior para o menor.
+    fn fold_dirs(&mut self) -> Result<()> {
+        let mut ids: Vec<i64> = self.dirs.keys().copied().collect();
+        ids.sort_unstable();
+        let mut sub: HashMap<i64, u64> = HashMap::new();
+        for &id in ids.iter().rev() {
+            let a = &self.dirs[&id];
+            let total = a.size + sub.remove(&id).unwrap_or(0);
+            if let Some(p) = a.parent {
+                *sub.entry(p).or_default() += total;
+            }
+            if total != 0 || a.count != 0 {
+                self.upd.execute(params![total as i64, a.count as i64, id])?;
+            }
         }
         Ok(())
     }
@@ -480,8 +663,7 @@ impl<'a> Walker<'a> {
     }
 
     fn insert_archive_nodes(&mut self, archive: &Item, nodes: &[Node]) -> Result<()> {
-        let base = self.next_id;
-        self.next_id += nodes.len() as i64;
+        let base = self.next_id.fetch_add(nodes.len() as i64, Ordering::Relaxed);
         for (i, n) in nodes.iter().enumerate() {
             let ext = if n.is_dir { None } else { ext_of(&n.name) };
             let it = Item {
@@ -635,17 +817,53 @@ pub fn read_disk_as(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(ReadProgress),
 ) -> Result<Disk> {
+    read_disk_threads(catalog, vol, opts, extractor, cancel, progress, walk_threads())
+}
+
+/// Igual a [`read_disk_as`], com o nº de threads leitoras escolhido (testes e medições).
+#[doc(hidden)]
+pub fn read_disk_threads(
+    catalog: &mut Catalog,
+    vol: &MountedVolume,
+    opts: &ReadOptions,
+    extractor: &dyn DetailExtractor,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(ReadProgress),
+    threads: usize,
+) -> Result<Disk> {
+    // Ajustes do SQLite só durante a leitura em massa (voltam ao normal no fim, com ou sem erro).
+    let _ = catalog.conn.execute_batch("PRAGMA cache_size=-262144; PRAGMA temp_store=MEMORY;");
+    catalog.conn.create_scalar_function(
+        "hdf_norm",
+        1,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| Ok(normalize(&ctx.get::<String>(0)?)),
+    )?;
+    let r = read_disk_inner(catalog, vol, opts, extractor, cancel, progress, threads.max(1));
+    let _ = catalog.conn.execute_batch("PRAGMA cache_size=-2000; PRAGMA temp_store=DEFAULT;");
+    r
+}
+
+fn read_disk_inner(
+    catalog: &mut Catalog,
+    vol: &MountedVolume,
+    opts: &ReadOptions,
+    extractor: &dyn DetailExtractor,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(ReadProgress),
+    threads: usize,
+) -> Result<Disk> {
     let root = PathBuf::from(&vol.mount_path);
     if !root.is_dir() {
         return Err(Error::msg("O disco não está plugado."));
     }
     let root_md = std::fs::metadata(&root)?;
     let is_slash = root == Path::new("/");
-    let mut allowed_devs: Vec<u64> = dev_of(&root_md).into_iter().collect();
+    let mut allowed_devs: Vec<u64> = fastdir::md_dev(&root_md).into_iter().collect();
     if is_slash {
         // No macOS os arquivos do usuário ficam no volume "Data", ligado a "/" por firmlinks.
         if let Ok(m) = std::fs::metadata("/System/Volumes/Data") {
-            allowed_devs.extend(dev_of(&m));
+            allowed_devs.extend(fastdir::md_dev(&m));
         }
     }
 
@@ -715,57 +933,80 @@ pub fn read_disk_as(
     }
 
     let first_new_id: i64 = tx.query_row("SELECT COALESCE(MAX(id),0)+1 FROM items", [], |r| r.get(0))?;
+    let next_id = AtomicI64::new(first_new_id);
 
     let (item_count, total_bytes, skipped);
     {
         let conn: &Connection = &tx;
-        let mut w = Walker {
+        let sh = Shared {
+            disk_id,
+            include_hidden: opts.include_hidden,
+            is_slash,
+            allowed_devs,
+            extractor,
+            cancel,
+            stop: AtomicBool::new(false),
+            old,
+            next_id: &next_id,
+            skipped: AtomicU64::new(0),
+        };
+        let mut w = Writer {
             conn,
             ins: conn.prepare(
                 "INSERT INTO items(id,disk_id,parent_id,name,path,kind,ext,size_bytes,created_at,modified_at,
                     inside_archive,child_count,video_duration,video_width,video_height,video_codec,video_fps)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
             )?,
-            ins_fts: conn.prepare("INSERT INTO items_fts(rowid,name_norm) VALUES (?1,?2)")?,
             upd: conn.prepare("UPDATE items SET size_bytes=?1, child_count=?2 WHERE id=?3")?,
             disk_id,
             uuid: vol.uuid.clone(),
-            root: root.clone(),
-            include_hidden: opts.include_hidden,
-            is_slash,
-            allowed_devs,
             extractor,
             cancel,
             progress: &mut *progress,
-            old,
+            next_id: &next_id,
             pending: Vec::new(),
-            next_id: first_new_id,
+            dirs: HashMap::new(),
             seen: 0,
-            skipped: 0,
             item_count: 0,
             total_bytes: 0,
             phase: Phase::Listing,
             last_emit: Instant::now() - Duration::from_secs(1),
         };
         w.emit(None, None);
-        let root_path = w.root.clone();
-        w.walk_dir(&root_path, "", None)?;
+        w.run_listing(&sh, &root, threads)?;
         w.run_details()?;
         w.phase = Phase::Saving;
-        w.emit(None, None);
+        w.emit(None, Some("Somando o tamanho das pastas".into()));
+        w.fold_dirs()?;
         item_count = w.item_count;
         total_bytes = w.total_bytes;
-        skipped = w.skipped;
+        skipped = sh.skipped.load(Ordering::Relaxed);
     }
 
+    // Índice de busca (ADR 0012): só agora, de uma vez. Apaga as linhas de busca antigas do
+    // disco (os itens antigos ainda existem aqui) e refaz tudo com um INSERT ... SELECT.
+    progress(ReadProgress {
+        disk_uuid: vol.uuid.clone(),
+        phase: Phase::Saving,
+        items_seen: item_count,
+        current_path: None,
+        message: Some("Montando o índice de busca".into()),
+    });
+    tx.execute(
+        "DELETE FROM items_fts WHERE rowid IN (SELECT id FROM items WHERE disk_id=?1)",
+        [disk_id],
+    )?;
     if quick {
         // Troca as linhas antigas pelas novas.
-        tx.execute(
-            "DELETE FROM items_fts WHERE rowid IN (SELECT id FROM items WHERE disk_id=?1 AND id<?2)",
-            params![disk_id, first_new_id],
-        )?;
         tx.execute("DELETE FROM items WHERE disk_id=?1 AND id<?2", params![disk_id, first_new_id])?;
     }
+    // Sem fusões automáticas de segmentos durante a carga em massa (voltam ao normal depois).
+    tx.execute("INSERT INTO items_fts(items_fts, rank) VALUES('automerge', 0)", [])?;
+    tx.execute(
+        "INSERT INTO items_fts(rowid,name_norm) SELECT id, hdf_norm(name) FROM items WHERE disk_id=?1",
+        [disk_id],
+    )?;
+    tx.execute("INSERT INTO items_fts(items_fts, rank) VALUES('automerge', 4)", [])?;
     tx.execute(
         "UPDATE disks SET item_count=?2, total_bytes=?3, last_read_at=?4 WHERE id=?1",
         params![disk_id, item_count as i64, total_bytes as i64, now],
@@ -787,4 +1028,102 @@ pub fn read_disk_as(
         }),
     });
     Ok(disk)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Counting {
+        wants: AtomicUsize,
+        extracts: AtomicUsize,
+    }
+    impl DetailExtractor for Counting {
+        fn wants(&self, item: &Item) -> bool {
+            self.wants.fetch_add(1, Ordering::SeqCst);
+            matches!(item.kind, Kind::Video | Kind::Archive)
+        }
+        fn extract(&self, _path: &Path) -> Details {
+            self.extracts.fetch_add(1, Ordering::SeqCst);
+            Details::default()
+        }
+    }
+
+    fn entry(name: &str, dataless: bool) -> DirEntry {
+        DirEntry {
+            name: name.into(),
+            raw_name: None,
+            is_dir: false,
+            size: 123,
+            created: Some(0),
+            modified: Some(0),
+            dataless,
+            dev: None,
+        }
+    }
+
+    fn shared<'a>(
+        ex: &'a dyn DetailExtractor,
+        cancel: &'a AtomicBool,
+        next: &'a AtomicI64,
+        devs: Vec<u64>,
+    ) -> Shared<'a> {
+        Shared {
+            disk_id: 1,
+            include_hidden: false,
+            is_slash: false,
+            allowed_devs: devs,
+            extractor: ex,
+            cancel,
+            stop: AtomicBool::new(false),
+            old: HashMap::new(),
+            next_id: next,
+            skipped: AtomicU64::new(0),
+        }
+    }
+
+    #[test]
+    fn dataless_files_never_reach_the_extractor() {
+        let ex = Counting { wants: AtomicUsize::new(0), extracts: AtomicUsize::new(0) };
+        let (cancel, next) = (AtomicBool::new(false), AtomicI64::new(1));
+        let sh = shared(&ex, &cancel, &next, vec![]);
+        let dir = Path::new("/x");
+
+        // Só na nuvem: entra no catálogo, mas sem trabalho caro (nem sequer pergunta ao extrator).
+        let Out::File { item, full, .. } = sh.make_file(&entry("nuvem.mov", true), dir, "nuvem.mov".into(), None)
+        else {
+            panic!()
+        };
+        assert_eq!(item.size_bytes, 123);
+        assert!(full.is_none());
+        assert_eq!(ex.wants.load(Ordering::SeqCst), 0);
+
+        // Arquivo normal do mesmo tipo: vai para o extrator.
+        let Out::File { full, .. } = sh.make_file(&entry("local.mov", false), dir, "local.mov".into(), None)
+        else {
+            panic!()
+        };
+        assert_eq!(full.as_deref(), Some(Path::new("/x/local.mov")));
+        assert_eq!(ex.wants.load(Ordering::SeqCst), 1);
+
+        // A função de decisão, direto.
+        let it = item;
+        assert!(!should_extract(&ex, &it, true, false));
+        assert!(should_extract(&ex, &it, false, false));
+        assert!(!should_extract(&ex, &it, false, true));
+        assert_eq!(ex.extracts.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn other_volumes_are_not_crossed() {
+        let (ex, cancel, next) = (NoopExtractor, AtomicBool::new(false), AtomicI64::new(1));
+        let sh = shared(&ex, &cancel, &next, vec![10, 11]);
+        assert!(sh.skip_dir("Volumes-x", Some(99)), "outro dispositivo = ponto de montagem");
+        assert!(!sh.skip_dir("a", Some(11)));
+        assert!(!sh.skip_dir("a", None));
+        let mut slash = shared(&ex, &cancel, &next, vec![10]);
+        slash.is_slash = true;
+        assert!(slash.skip_dir("Volumes", Some(10)));
+        assert!(!slash.skip_dir("Users", Some(10)));
+    }
 }
