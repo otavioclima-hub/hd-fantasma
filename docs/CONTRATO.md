@@ -34,17 +34,7 @@ interface Item {
   sizeBytes: number;         // pasta = soma recursiva
   createdAt: string | null;
   modifiedAt: string | null;
-  insideArchive: boolean;    // true = Conteúdo compactado
-  childCount: number;        // pastas e arquivos compactados; 0 nos demais
-  video: VideoInfo | null;
-}
-
-interface VideoInfo {
-  durationSec: number | null;
-  width: number | null;
-  height: number | null;
-  codec: string | null;      // "prores", "h264", "hevc"...
-  fps: number | null;
+  childCount: number;        // pastas; 0 nos demais
 }
 
 interface SearchQuery {
@@ -73,9 +63,14 @@ interface ReadOptions { mode: "quick" | "full"; includeHidden: boolean; }
 
 // evento "read-progress", emitido durante a Leitura
 interface ReadProgress {
-  diskUuid: string; phase: "listing" | "details" | "saving" | "done" | "error";
+  diskUuid: string; phase: "listing" | "saving" | "done" | "error";
   itemsSeen: number; currentPath: string | null; message: string | null;
+  bytesSeen: number;        // espaço real ocupado (alocado) somado até agora; nuvem-only = 0
+  bytesExpected: number;    // espaço ocupado do volume no início (capacidade − livre); 0 se desconhecido
+  inCloud: boolean;         // currentPath está numa pasta de nuvem (CloudStorage, Mobile Documents)
 }
+// A UI calcula porcentagem (teto 99% até "done") e o tempo restante
+// pela velocidade média dos últimos ~20 s; "Calculando…" nos primeiros 5 s.
 ```
 
 ## Comandos Tauri (`invoke`)
@@ -98,3 +93,5 @@ interface ReadProgress {
 | `get_settings` / `set_settings` | `{ settings: { language: "pt" \| "en", includeHidden: boolean } }` | settings |
 
 Erros: string legível em pt-BR (ex.: `"O disco não está plugado."`).
+
+O app nunca abre arquivos (ADR 0013): sem dados de vídeo, sem conteúdo de compactados.

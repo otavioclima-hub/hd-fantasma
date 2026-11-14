@@ -1,7 +1,7 @@
 use hdf_core::*;
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::AtomicBool;
 
 fn write(root: &Path, rel: &str, bytes: usize) {
     let p = root.join(rel);
@@ -33,47 +33,13 @@ fn vol(root: &Path, uuid: &str) -> MountedVolume {
     }
 }
 
-struct Fake {
-    calls: AtomicUsize,
-}
-impl DetailExtractor for Fake {
-    fn wants(&self, item: &Item) -> bool {
-        matches!(item.kind, Kind::Video | Kind::Archive)
-    }
-    fn extract(&self, path: &Path) -> Details {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        let name = path.file_name().unwrap().to_string_lossy().to_string();
-        if name.ends_with(".zip") {
-            Details {
-                video: None,
-                archive_entries: vec![
-                    ArchiveEntry { path: "cenas/take1.mov".into(), size_bytes: 300, modified_at: None, is_dir: false },
-                    ArchiveEntry { path: "cenas/take2.mov".into(), size_bytes: 200, modified_at: None, is_dir: false },
-                    ArchiveEntry { path: "leia-me.txt".into(), size_bytes: 5, modified_at: None, is_dir: false },
-                ],
-            }
-        } else {
-            Details {
-                video: Some(VideoInfo {
-                    duration_sec: Some(12.5),
-                    width: Some(1920),
-                    height: Some(1080),
-                    codec: Some("prores".into()),
-                    fps: Some(24.0),
-                }),
-                archive_entries: vec![],
-            }
-        }
-    }
-}
-
 fn opts(mode: ReadMode, hidden: bool) -> ReadOptions {
     ReadOptions { mode, include_hidden: hidden }
 }
 
-fn scan(cat: &mut Catalog, v: &MountedVolume, mode: ReadMode, hidden: bool, ex: &dyn DetailExtractor) -> Disk {
+fn scan(cat: &mut Catalog, v: &MountedVolume, mode: ReadMode, hidden: bool) -> Disk {
     let cancel = AtomicBool::new(false);
-    read_disk_as(cat, v, &opts(mode, hidden), ex, &cancel, &mut |_| {}).unwrap()
+    read_disk_as(cat, v, &opts(mode, hidden), &cancel, &mut |_| {}).unwrap()
 }
 
 fn q(text: &str) -> SearchQuery {
@@ -92,7 +58,7 @@ fn setup() -> (tempfile::TempDir, tempfile::TempDir, Catalog, MountedVolume) {
 #[test]
 fn scan_counts_sizes_and_ignores_system_files() {
     let (_d, _s, mut cat, v) = setup();
-    let disk = scan(&mut cat, &v, ReadMode::Full, false, &NoopExtractor);
+    let disk = scan(&mut cat, &v, ReadMode::Full, false);
     // Pastas: Projetos, 2025, Backup = 3; arquivos: 6.
     assert_eq!(disk.item_count, 9);
     assert_eq!(disk.total_bytes, 100 + 10 + 50 + 20 + 100 + 7);
@@ -116,14 +82,14 @@ fn scan_counts_sizes_and_ignores_system_files() {
     assert!(kids[2].modified_at.as_deref().unwrap().ends_with('Z'));
 
     // Ocultos incluídos quando pedido (releitura completa).
-    let disk = scan(&mut cat, &v, ReadMode::Full, true, &NoopExtractor);
+    let disk = scan(&mut cat, &v, ReadMode::Full, true);
     assert_eq!(disk.item_count, 9 + 3);
 }
 
 #[test]
 fn search_is_partial_and_accent_insensitive() {
     let (_d, _s, mut cat, v) = setup();
-    scan(&mut cat, &v, ReadMode::Full, false, &NoopExtractor);
+    scan(&mut cat, &v, ReadMode::Full, false);
     let n = |t: &str| cat.search(&q(t)).unwrap();
     assert_eq!(n("video").total, 1); // "Vídeo Institucional"
     assert_eq!(n("VÍDEO").items[0].name, "Vídeo Institucional.mp4");
@@ -162,58 +128,31 @@ fn search_is_partial_and_accent_insensitive() {
 }
 
 #[test]
-fn quick_mode_keeps_details_for_unchanged_items() {
+fn quick_and_full_modes_both_rebuild_without_duplicates() {
     let (d, _s, mut cat, v) = setup();
-    let ex = Fake { calls: AtomicUsize::new(0) };
-    let disk = scan(&mut cat, &v, ReadMode::Full, false, &ex);
-    // 3 .mov + 1 .mp4 + 1 .zip
-    assert_eq!(ex.calls.load(Ordering::SeqCst), 5);
-    let mov = cat.search(&q("outro")).unwrap().items.remove(0);
-    assert_eq!(mov.video.as_ref().unwrap().codec.as_deref(), Some("prores"));
-    // conteúdo compactado: 3 arquivos + pasta "cenas"
-    let zip = cat.search(&q("pacote")).unwrap().items.remove(0);
-    assert_eq!(zip.child_count, 2); // cenas/ + leia-me.txt
-    let inside = cat.list_children(disk.id, Some(zip.id)).unwrap();
-    assert_eq!(inside[0].name, "cenas");
-    assert_eq!(inside[0].size_bytes, 500);
-    assert!(inside[0].inside_archive);
-    assert_eq!(inside[0].path, "Projetos/pacote.zip/cenas");
-    // item dentro do zip é pesquisável
-    assert_eq!(cat.search(&q("take1")).unwrap().total, 1);
-    let before_total = cat.search(&q("")).unwrap().total;
-
-    // Atualização rápida sem mudanças: nenhuma extração nova, detalhes preservados.
-    let disk2 = scan(&mut cat, &v, ReadMode::Quick, false, &ex);
-    assert_eq!(ex.calls.load(Ordering::SeqCst), 5, "não deveria reextrair");
+    let disk = scan(&mut cat, &v, ReadMode::Full, false);
+    let before = cat.search(&q("")).unwrap().total;
+    let disk2 = scan(&mut cat, &v, ReadMode::Quick, false);
     assert_eq!(disk2.id, disk.id);
-    assert_eq!(cat.search(&q("")).unwrap().total, before_total, "sem linhas duplicadas ou perdidas");
-    let mov = cat.search(&q("outro")).unwrap().items.remove(0);
-    assert_eq!(mov.video.as_ref().unwrap().width, Some(1920));
-    assert_eq!(cat.search(&q("take1")).unwrap().total, 1);
-    let zip = cat.search(&q("pacote")).unwrap().items.remove(0);
-    assert_eq!(zip.child_count, 2);
-    assert_eq!(cat.list_children(disk.id, Some(zip.id)).unwrap().len(), 2);
+    assert_eq!(cat.search(&q("")).unwrap().total, before, "sem linhas duplicadas ou perdidas");
 
-    // Muda um arquivo e adiciona outro: só os novos/alterados são reprocessados.
     write(d.path(), "Backup/outro.mov", 9);
     write(d.path(), "Backup/novo.mov", 3);
     fs::remove_file(d.path().join("Projetos/2025/notas.txt")).unwrap();
-    let disk3 = scan(&mut cat, &v, ReadMode::Quick, false, &ex);
-    assert_eq!(ex.calls.load(Ordering::SeqCst), 7);
+    let disk3 = scan(&mut cat, &v, ReadMode::Quick, false);
     assert_eq!(cat.search(&q("notas")).unwrap().total, 0);
     assert_eq!(cat.search(&q("novo")).unwrap().total, 1);
     assert_eq!(disk3.item_count, 9 + 1 - 1);
+    assert_eq!(cat.search(&q("outro")).unwrap().items[0].size_bytes, 9);
 
-    // Releitura completa refaz tudo.
-    scan(&mut cat, &v, ReadMode::Full, false, &ex);
-    assert_eq!(ex.calls.load(Ordering::SeqCst), 7 + 6);
+    scan(&mut cat, &v, ReadMode::Full, false);
     assert_eq!(cat.list_disks(&[]).unwrap().len(), 1);
 }
 
 #[test]
 fn duplicates_by_name_and_size() {
     let (_d, _s, mut cat, v) = setup();
-    let disk = scan(&mut cat, &v, ReadMode::Full, false, &NoopExtractor);
+    let disk = scan(&mut cat, &v, ReadMode::Full, false);
     let g = cat.find_duplicates(&[], 0).unwrap();
     assert_eq!(g.len(), 1);
     assert_eq!(g[0].name, "CLIENTE_v3_final.mov");
@@ -227,8 +166,7 @@ fn duplicates_by_name_and_size() {
 #[test]
 fn export_then_import_roundtrip() {
     let (_d, s, mut cat, v) = setup();
-    let ex = Fake { calls: AtomicUsize::new(0) };
-    let disk = scan(&mut cat, &v, ReadMode::Full, false, &ex);
+    let disk = scan(&mut cat, &v, ReadMode::Full, false);
     let file = s.path().join("teste.hdfantasma");
     cat.export_disk(disk.id, &file).unwrap();
 
@@ -236,20 +174,15 @@ fn export_then_import_roundtrip() {
     let other_data = tempfile::tempdir().unwrap();
     write(other_data.path(), "a/b.txt", 4);
     let mut cat2 = Catalog::open(s.path().join("c2.sqlite")).unwrap();
-    scan(&mut cat2, &vol(other_data.path(), "uuid-2"), ReadMode::Full, false, &NoopExtractor);
+    scan(&mut cat2, &vol(other_data.path(), "uuid-2"), ReadMode::Full, false);
     let imported = cat2.import_disk(&file).unwrap();
     assert_eq!(imported.uuid, "uuid-1");
     assert_eq!(imported.item_count, disk.item_count);
     assert!(!imported.present);
     assert_eq!(cat2.list_disks(&[]).unwrap().len(), 2);
-    assert_eq!(cat2.search(&q("take1")).unwrap().total, 1);
     assert_eq!(cat2.search(&q("video")).unwrap().total, 1);
     let root = cat2.list_children(imported.id, None).unwrap();
     assert_eq!(root.len(), 2);
-    let outro = cat2.search(&q("outro")).unwrap().items.remove(0);
-    assert_eq!(outro.video.unwrap().codec.as_deref(), Some("prores"));
-    let zip = cat2.search(&q("pacote")).unwrap().items.remove(0);
-    assert_eq!(cat2.list_children(imported.id, Some(zip.id)).unwrap()[0].name, "cenas");
     // pai de cada item existe (ids remapeados direito)
     for it in cat2.search(&SearchQuery { limit: 100, ..Default::default() }).unwrap().items {
         if let Some(p) = it.parent_id {
@@ -273,9 +206,9 @@ fn export_then_import_roundtrip() {
 #[test]
 fn cancel_rolls_back_and_delete_cleans_search() {
     let (_d, _s, mut cat, v) = setup();
-    let disk = scan(&mut cat, &v, ReadMode::Full, false, &NoopExtractor);
+    let disk = scan(&mut cat, &v, ReadMode::Full, false);
     let cancel = AtomicBool::new(true);
-    let r = read_disk_as(&mut cat, &v, &opts(ReadMode::Full, false), &NoopExtractor, &cancel, &mut |_| {});
+    let r = read_disk_as(&mut cat, &v, &opts(ReadMode::Full, false), &cancel, &mut |_| {});
     assert!(matches!(r, Err(Error::Cancelled)));
     // catálogo intacto
     assert_eq!(cat.search(&q("")).unwrap().total, 9);
@@ -296,13 +229,92 @@ fn progress_is_emitted_and_ends_with_done() {
     let (_d, _s, mut cat, v) = setup();
     let cancel = AtomicBool::new(false);
     let mut phases = vec![];
-    read_disk_as(&mut cat, &v, &opts(ReadMode::Full, false), &NoopExtractor, &cancel, &mut |p| {
+    read_disk_as(&mut cat, &v, &opts(ReadMode::Full, false), &cancel, &mut |p| {
         phases.push(p.phase)
     })
     .unwrap();
     assert_eq!(phases.first(), Some(&Phase::Listing));
     assert!(phases.contains(&Phase::Saving));
     assert_eq!(phases.last(), Some(&Phase::Done));
+}
+
+#[test]
+fn progress_reports_bytes() {
+    let (_d, _s, mut cat, v) = setup();
+    let cancel = AtomicBool::new(false);
+    let mut last_listing_bytes = 0;
+    let mut done_bytes = 0;
+    let mut phases = vec![];
+    read_disk_as(&mut cat, &v, &opts(ReadMode::Full, false), &cancel, &mut |p| {
+        // vol(): capacidade 1000 - livre 500 = 500 esperados
+        assert_eq!(p.bytes_expected, 500);
+        assert!(!p.in_cloud);
+        match p.phase {
+            Phase::Listing => last_listing_bytes = p.bytes_seen,
+            Phase::Done => done_bytes = p.bytes_seen,
+            _ => {}
+        }
+        phases.push(p.phase);
+    })
+    .unwrap();
+    assert!(done_bytes > 0, "bytesSeen soma o espaço alocado dos arquivos");
+    assert!(done_bytes >= last_listing_bytes);
+    assert_eq!(phases.first(), Some(&Phase::Listing));
+    assert_eq!(phases.last(), Some(&Phase::Done));
+    let j = serde_json::to_value(ReadProgress::new("u".into(), Phase::Done, 1, None)).unwrap();
+    for k in ["bytesSeen", "bytesExpected", "inCloud"] {
+        assert!(j.get(k).is_some(), "campo {k} no JSON");
+    }
+    for k in ["detailsDone", "detailsTotal"] {
+        assert!(j.get(k).is_none(), "campo {k} não existe mais");
+    }
+}
+
+/// Catálogo da versão 1 (com dados de vídeo e conteúdo compactado) abre e é migrado.
+#[test]
+fn v1_catalog_is_migrated() {
+    let store = tempfile::tempdir().unwrap();
+    let dbp = store.path().join("old.sqlite");
+    {
+        let c = rusqlite::Connection::open(&dbp).unwrap();
+        c.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL);
+             INSERT INTO schema_version VALUES (1);
+             CREATE TABLE disks (id INTEGER PRIMARY KEY, uuid TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+               filesystem TEXT NOT NULL DEFAULT '', capacity_bytes INTEGER NOT NULL DEFAULT 0,
+               free_bytes INTEGER NOT NULL DEFAULT 0, item_count INTEGER NOT NULL DEFAULT 0,
+               total_bytes INTEGER NOT NULL DEFAULT 0, last_read_at TEXT NOT NULL);
+             CREATE TABLE items (id INTEGER PRIMARY KEY, disk_id INTEGER NOT NULL REFERENCES disks(id) ON DELETE CASCADE,
+               parent_id INTEGER, name TEXT NOT NULL, path TEXT NOT NULL, kind TEXT NOT NULL, ext TEXT,
+               size_bytes INTEGER NOT NULL DEFAULT 0, created_at TEXT, modified_at TEXT,
+               inside_archive INTEGER NOT NULL DEFAULT 0, child_count INTEGER NOT NULL DEFAULT 0,
+               video_duration REAL, video_width INTEGER, video_height INTEGER, video_codec TEXT, video_fps REAL);
+             CREATE INDEX idx_items_parent ON items(disk_id, parent_id);
+             CREATE INDEX idx_items_dup ON items(name, size_bytes);
+             CREATE VIRTUAL TABLE items_fts USING fts5(name_norm, tokenize='trigram');
+             CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO disks VALUES (1,'u1','OLD','apfs',1000,500,3,300,'2025-01-01T00:00:00Z');
+             INSERT INTO items(id,disk_id,parent_id,name,path,kind,ext,size_bytes,inside_archive,child_count,video_codec)
+               VALUES (1,1,NULL,'pacote.zip','pacote.zip','archive','zip',100,0,1,NULL),
+                      (2,1,1,'dentro.mov','pacote.zip/dentro.mov','video','mov',200,1,0,NULL),
+                      (3,1,NULL,'filme.mov','filme.mov','video','mov',200,0,0,'prores');
+             INSERT INTO items_fts(rowid,name_norm) VALUES (1,'pacote.zip'),(2,'dentro.mov'),(3,'filme.mov');",
+        )
+        .unwrap();
+    }
+    let cat = Catalog::open(&dbp).unwrap();
+    assert_eq!(cat.search(&q("")).unwrap().total, 2, "conteúdo compactado sumiu");
+    assert_eq!(cat.search(&q("dentro")).unwrap().total, 0);
+    assert_eq!(cat.search(&q("filme")).unwrap().total, 1);
+    let d = &cat.list_disks(&[]).unwrap()[0];
+    assert_eq!((d.item_count, d.total_bytes), (2, 300));
+    let c = rusqlite::Connection::open(&dbp).unwrap();
+    let cols: i64 = c
+        .query_row("SELECT COUNT(*) FROM pragma_table_info('items') WHERE name LIKE 'video_%' OR name='inside_archive'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(cols, 0);
+    let v: i64 = c.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0)).unwrap();
+    assert_eq!(v, 2);
 }
 
 #[test]
@@ -321,47 +333,6 @@ fn settings_roundtrip_and_json_shape() {
     )
     .unwrap();
     assert_eq!(sq.kinds, vec![Kind::Video]);
-}
-
-/// Extrator lento que pede cancelamento no meio: a Leitura inteira volta atrás.
-#[test]
-fn cancel_during_details_rolls_back() {
-    struct Cancelling<'a>(&'a AtomicBool);
-    impl DetailExtractor for Cancelling<'_> {
-        fn wants(&self, item: &Item) -> bool {
-            item.kind == Kind::Video
-        }
-        fn extract(&self, _p: &Path) -> Details {
-            self.0.store(true, Ordering::SeqCst);
-            Details::default()
-        }
-    }
-    let (_d, _s, mut cat, v) = setup();
-    let cancel = AtomicBool::new(false);
-    let r = read_disk_as(&mut cat, &v, &opts(ReadMode::Full, false), &Cancelling(&cancel), &cancel, &mut |_| {});
-    assert!(matches!(r, Err(Error::Cancelled)));
-    assert!(cat.list_disks(&[]).unwrap().is_empty() || cat.list_disks(&[]).unwrap()[0].item_count == 0);
-}
-
-/// Vários itens pendentes em paralelo: todos recebem seus detalhes.
-#[test]
-fn parallel_details_cover_all_items() {
-    let data = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
-    for i in 0..40 {
-        std::fs::write(data.path().join(format!("c{i}.mov")), vec![0u8; 10 + i]).unwrap();
-    }
-    let mut cat = Catalog::open(store.path().join("c.sqlite")).unwrap();
-    let v = MountedVolume {
-        uuid: "par".into(), name: "PAR".into(), mount_path: data.path().to_string_lossy().into(),
-        filesystem: "apfs".into(), capacity_bytes: 0, free_bytes: 0, cataloged_disk_id: None,
-    };
-    let fake = Fake { calls: AtomicUsize::new(0) };
-    let disk = scan(&mut cat, &v, ReadMode::Full, false, &fake);
-    assert_eq!(fake.calls.load(Ordering::SeqCst), 40);
-    let kids = cat.list_children(disk.id, None).unwrap();
-    assert_eq!(kids.len(), 40);
-    assert!(kids.iter().all(|k| k.video.as_ref().and_then(|x| x.width) == Some(1920)));
 }
 
 // ------------------------------------------------------- leitura em paralelo (ADR 0012)
@@ -456,7 +427,7 @@ fn parallel_walk_matches_reference_walk() {
     let dbp = store.path().join("c.sqlite");
     let mut cat = Catalog::open(&dbp).unwrap();
     let v = vol(data.path(), "big");
-    let disk = scan(&mut cat, &v, ReadMode::Full, false, &NoopExtractor);
+    let disk = scan(&mut cat, &v, ReadMode::Full, false);
     assert_eq!(disk.item_count as usize, expected.len());
     assert_eq!(disk.total_bytes, total);
     let (rows, items, fts) = catalog_rows(&dbp);
@@ -466,7 +437,7 @@ fn parallel_walk_matches_reference_walk() {
     // Busca funciona depois da leitura, e depois da atualização rápida.
     let n1 = cat.search(&q("f3-")).unwrap().total;
     assert!(n1 > 1000);
-    let disk2 = scan(&mut cat, &v, ReadMode::Quick, false, &NoopExtractor);
+    let disk2 = scan(&mut cat, &v, ReadMode::Quick, false);
     assert_eq!(disk2.item_count, disk.item_count);
     let (rows2, items2, fts2) = catalog_rows(&dbp);
     assert_eq!(rows2, expected);
@@ -476,47 +447,9 @@ fn parallel_walk_matches_reference_walk() {
     // Com 1 thread e com muitas o resultado é o mesmo.
     for n in [1, 40] {
         let cancel = AtomicBool::new(false);
-        let disk3 = read_disk_threads(&mut cat, &v, &opts(ReadMode::Full, false), &NoopExtractor, &cancel, &mut |_| {}, n)
+        let disk3 = read_disk_threads(&mut cat, &v, &opts(ReadMode::Full, false), &cancel, &mut |_| {}, n)
             .unwrap();
         assert_eq!(disk3.item_count, disk.item_count);
         assert_eq!(catalog_rows(&dbp).0, expected);
     }
-}
-
-/// Cancelar no meio da listagem (as threads leitoras já rodando) desfaz tudo.
-#[test]
-fn cancel_mid_walk_rolls_back() {
-    struct CancelAfter<'a> {
-        cancel: &'a AtomicBool,
-        calls: AtomicUsize,
-    }
-    impl DetailExtractor for CancelAfter<'_> {
-        fn wants(&self, _item: &Item) -> bool {
-            if self.calls.fetch_add(1, Ordering::SeqCst) == 800 {
-                self.cancel.store(true, Ordering::SeqCst);
-            }
-            false
-        }
-        fn extract(&self, _p: &Path) -> Details {
-            Details::default()
-        }
-    }
-    let data = tempfile::tempdir().unwrap();
-    let store = tempfile::tempdir().unwrap();
-    make_big_tree(data.path());
-    let dbp = store.path().join("c.sqlite");
-    let mut cat = Catalog::open(&dbp).unwrap();
-    let v = vol(data.path(), "cancel");
-    let cancel = AtomicBool::new(false);
-    let ex = CancelAfter { cancel: &cancel, calls: AtomicUsize::new(0) };
-    let r = read_disk_as(&mut cat, &v, &opts(ReadMode::Full, false), &ex, &cancel, &mut |_| {});
-    assert!(matches!(r, Err(Error::Cancelled)));
-    assert!(ex.calls.load(Ordering::SeqCst) > 800);
-    assert!(cat.list_disks(&[]).unwrap().is_empty(), "nada ficou gravado");
-    let (rows, items, fts) = catalog_rows(&dbp);
-    assert!(rows.is_empty() && items == 0 && fts == 0);
-
-    // Depois do cancelamento uma leitura normal funciona.
-    let disk = scan(&mut cat, &v, ReadMode::Full, false, &NoopExtractor);
-    assert!(disk.item_count > 5000);
 }

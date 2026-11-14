@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { S, diskById, activate, goUp, gotoResult, loadMore, toggleRowArchive, expandable, searchActive } from "$lib/store.svelte";
+  import { S, diskById, activate, goUp, gotoResult, loadMore, searchActive } from "$lib/store.svelte";
   import { t, locale, type Key } from "$lib/i18n";
-  import { formatBytes, formatDate, formatDuration, formatNumber, formatResolution, parentPath } from "$lib/format";
+  import { formatBytes, formatDate, formatNumber, parentPath } from "$lib/format";
   import type { Item } from "$lib/types";
   import KindIcon from "./KindIcon.svelte";
 
@@ -18,9 +18,6 @@
       case "size": r = a.sizeBytes - b.sizeBytes; break;
       case "kind": r = a.kind.localeCompare(b.kind) || (a.ext ?? "").localeCompare(b.ext ?? ""); break;
       case "modified": r = (a.modifiedAt ?? "").localeCompare(b.modifiedAt ?? ""); break;
-      case "duration": r = (a.video?.durationSec ?? -1) - (b.video?.durationSec ?? -1); break;
-      case "resolution": r = (a.video?.width ?? 0) * (a.video?.height ?? 0) - (b.video?.width ?? 0) * (b.video?.height ?? 0); break;
-      case "codec": r = (a.video?.codec ?? "").localeCompare(b.video?.codec ?? ""); break;
       case "disk": r = (diskById(a.diskId)?.name ?? "").localeCompare(diskById(b.diskId)?.name ?? ""); break;
       case "path": r = a.path.localeCompare(b.path, undefined, { numeric: true }); break;
       default: r = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
@@ -34,18 +31,8 @@
 
   const flat = $derived.by<Row[]>(() => {
     if (searching) return sorted(S.results).map((item) => ({ item, depth: 0 }));
-    const out: Row[] = [];
-    const walk = (list: Item[], depth: number) => {
-      for (const item of sorted(list)) {
-        out.push({ item, depth });
-        if (S.tableExpanded[item.id] && S.tableChildren[item.id]) walk(S.tableChildren[item.id], depth + 1);
-      }
-    };
-    walk(S.rows, 0);
-    return out;
+    return sorted(S.rows).map((item) => ({ item, depth: 0 }));
   });
-
-  const showVideo = $derived(searching || flat.some((r) => r.item.video));
 
   type Col = { key: string; label: Key; width: string; align?: "right" };
   const cols = $derived.by<Col[]>(() => {
@@ -58,9 +45,6 @@
       { key: "kind", label: "col.kind", width: "92px" },
       { key: "modified", label: "col.modified", width: "128px" },
     );
-    if (showVideo) {
-      c.push({ key: "duration", label: "col.duration", width: "68px", align: "right" }, { key: "resolution", label: "col.resolution", width: "92px" }, { key: "codec", label: "col.codec", width: "70px" });
-    }
     return c;
   });
   const template = $derived(cols.map((c) => c.width).join(" "));
@@ -118,8 +102,6 @@
       case "End": e.preventDefault(); move(1e9); break;
       case "Enter": if (S.selItem) { e.preventDefault(); activate(S.selItem); } break;
       case "Backspace": if (!searching) { e.preventDefault(); goUp(); } break;
-      case "ArrowRight": if (S.selItem && expandable(S.selItem) && !S.tableExpanded[S.selItem.id]) { e.preventDefault(); toggleRowArchive(S.selItem); } break;
-      case "ArrowLeft": if (S.selItem && S.tableExpanded[S.selItem.id]) { e.preventDefault(); toggleRowArchive(S.selItem); } break;
     }
   }
   function sortBy(key: string) {
@@ -161,10 +143,6 @@
                style="top:{i * ROW}px;grid-template-columns:{template}" role="row" tabindex="-1" aria-selected={S.selItem?.id === it.id}
                onclick={() => { select(it); scroller?.focus(); }} ondblclick={() => activate(it)}>
             <div class="cell name" style="padding-left:{8 + r.depth * 16}px">
-              {#if expandable(it)}
-                <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                <span class="tw" class:open={S.tableExpanded[it.id]} onclick={(e) => { e.stopPropagation(); toggleRowArchive(it); }}>▸</span>
-              {:else}<span class="tw none"></span>{/if}
               <KindIcon kind={it.kind} />
               <span class="ellipsis" title={it.name}>{it.name}</span>
             </div>
@@ -175,11 +153,6 @@
             <div class="cell r num">{formatBytes(it.sizeBytes, $locale)}</div>
             <div class="cell ellipsis muted">{kindLabel(it)}</div>
             <div class="cell ellipsis muted num">{formatDate(it.modifiedAt, $locale)}</div>
-            {#if showVideo}
-              <div class="cell r num">{formatDuration(it.video?.durationSec)}</div>
-              <div class="cell num">{formatResolution(it.video)}</div>
-              <div class="cell ellipsis muted">{it.video?.codec ?? ""}</div>
-            {/if}
           </div>
         {/each}
       </div>
@@ -211,8 +184,5 @@
   .cell { padding: 0 8px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .cell.r { text-align: right; }
   .cell.name { display: flex; align-items: center; gap: 6px; }
-  .tw { width: 12px; text-align: center; font-size: 10px; color: var(--fg-2); transition: transform 0.1s; flex: none; }
-  .tw.open { transform: rotate(90deg); }
-  .tw.none { visibility: hidden; }
   .note { padding: 14px 16px; margin: 0; position: sticky; left: 0; }
 </style>

@@ -6,12 +6,11 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::path::{Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Colunas de `items` na ordem lida por [`row_to_item`].
 pub const ITEM_COLS: &str = "i.id, i.disk_id, i.parent_id, i.name, i.path, i.kind, i.ext, \
-    i.size_bytes, i.created_at, i.modified_at, i.inside_archive, i.child_count, \
-    i.video_duration, i.video_width, i.video_height, i.video_codec, i.video_fps";
+    i.size_bytes, i.created_at, i.modified_at, i.child_count";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -37,13 +36,7 @@ CREATE TABLE IF NOT EXISTS items (
     size_bytes INTEGER NOT NULL DEFAULT 0,
     created_at TEXT,
     modified_at TEXT,
-    inside_archive INTEGER NOT NULL DEFAULT 0,
-    child_count INTEGER NOT NULL DEFAULT 0,
-    video_duration REAL,
-    video_width INTEGER,
-    video_height INTEGER,
-    video_codec TEXT,
-    video_fps REAL
+    child_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_items_parent ON items(disk_id, parent_id);
 CREATE INDEX IF NOT EXISTS idx_items_dup ON items(name, size_bytes);
@@ -135,7 +128,23 @@ impl Catalog {
         }
         let tx = self.conn.unchecked_transaction()?;
         tx.execute_batch(SCHEMA)?;
-        // Migrações futuras entram aqui: `if v < 2 { ... }`.
+        if v == 1 {
+            // v2: o app nunca abre arquivos. Some o conteúdo compactado (inside_archive) e os
+            // dados de vídeo. Catálogos antigos continuam abrindo; o resto fica como estava.
+            tx.execute(
+                "DELETE FROM items_fts WHERE rowid IN (SELECT id FROM items WHERE inside_archive=1)",
+                [],
+            )?;
+            tx.execute("DELETE FROM items WHERE inside_archive=1", [])?;
+            for col in ["inside_archive", "video_duration", "video_width", "video_height", "video_codec", "video_fps"] {
+                tx.execute(&format!("ALTER TABLE items DROP COLUMN {col}"), [])?;
+            }
+            tx.execute(
+                "UPDATE disks SET item_count=(SELECT COUNT(*) FROM items WHERE disk_id=disks.id),
+                    total_bytes=(SELECT COALESCE(SUM(size_bytes),0) FROM items WHERE disk_id=disks.id AND kind!='folder')",
+                [],
+            )?;
+        }
         tx.execute("DELETE FROM schema_version", [])?;
         tx.execute("INSERT INTO schema_version(version) VALUES (?1)", [SCHEMA_VERSION])?;
         tx.commit()?;
@@ -377,17 +386,28 @@ impl Catalog {
                     [],
                     |r| r.get(0),
                 )?;
+                // Exportação v1 traz conteúdo compactado (inside_archive=1): não entra mais.
+                let old_fmt: bool = self.conn.query_row(
+                    "SELECT COUNT(*) > 0 FROM pragma_table_info('items','imp') WHERE name='inside_archive'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                let keep = if old_fmt { "WHERE inside_archive=0" } else { "" };
+                let keep_i = if old_fmt { "WHERE i.inside_archive=0" } else { "" };
                 self.conn.execute(
-                    "INSERT INTO main.items(id,disk_id,parent_id,name,path,kind,ext,size_bytes,created_at,modified_at,
-                        inside_archive,child_count,video_duration,video_width,video_height,video_codec,video_fps)
-                     SELECT id+?1, ?2, CASE WHEN parent_id IS NULL THEN NULL ELSE parent_id+?1 END,
-                        name,path,kind,ext,size_bytes,created_at,modified_at,
-                        inside_archive,child_count,video_duration,video_width,video_height,video_codec,video_fps
-                     FROM imp.items",
+                    &format!(
+                        "INSERT INTO main.items(id,disk_id,parent_id,name,path,kind,ext,size_bytes,created_at,modified_at,child_count)
+                         SELECT id+?1, ?2, CASE WHEN parent_id IS NULL THEN NULL ELSE parent_id+?1 END,
+                            name,path,kind,ext,size_bytes,created_at,modified_at,child_count
+                         FROM imp.items {keep}"
+                    ),
                     params![offset, disk_id],
                 )?;
                 self.conn.execute(
-                    "INSERT INTO main.items_fts(rowid,name_norm) SELECT rowid+?1, name_norm FROM imp.items_fts",
+                    &format!(
+                        "INSERT INTO main.items_fts(rowid,name_norm)
+                         SELECT f.rowid+?1, f.name_norm FROM imp.items_fts f JOIN imp.items i ON i.id=f.rowid {keep_i}"
+                    ),
                     [offset],
                 )?;
                 Ok(disk_id)
@@ -410,18 +430,6 @@ impl Catalog {
 }
 
 pub fn row_to_item(r: &Row) -> rusqlite::Result<Item> {
-    let dur: Option<f64> = r.get(12)?;
-    let w: Option<i64> = r.get(13)?;
-    let h: Option<i64> = r.get(14)?;
-    let codec: Option<String> = r.get(15)?;
-    let fps: Option<f64> = r.get(16)?;
-    let video = VideoInfo {
-        duration_sec: dur,
-        width: w.map(|v| v as u32),
-        height: h.map(|v| v as u32),
-        codec,
-        fps,
-    };
     Ok(Item {
         id: r.get(0)?,
         disk_id: r.get(1)?,
@@ -433,8 +441,6 @@ pub fn row_to_item(r: &Row) -> rusqlite::Result<Item> {
         size_bytes: r.get::<_, i64>(7)? as u64,
         created_at: r.get(8)?,
         modified_at: r.get(9)?,
-        inside_archive: r.get::<_, i64>(10)? != 0,
-        child_count: r.get::<_, i64>(11)? as u64,
-        video: if video.is_empty() { None } else { Some(video) },
+        child_count: r.get::<_, i64>(10)? as u64,
     })
 }

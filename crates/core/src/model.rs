@@ -75,26 +75,6 @@ pub struct Disk {
     pub mount_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct VideoInfo {
-    pub duration_sec: Option<f64>,
-    pub width: Option<u32>,
-    pub height: Option<u32>,
-    pub codec: Option<String>,
-    pub fps: Option<f64>,
-}
-
-impl VideoInfo {
-    pub fn is_empty(&self) -> bool {
-        self.duration_sec.is_none()
-            && self.width.is_none()
-            && self.height.is_none()
-            && self.codec.is_none()
-            && self.fps.is_none()
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Item {
@@ -108,9 +88,7 @@ pub struct Item {
     pub size_bytes: u64,
     pub created_at: Option<String>,
     pub modified_at: Option<String>,
-    pub inside_archive: bool,
     pub child_count: u64,
-    pub video: Option<VideoInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,7 +166,6 @@ pub struct ReadOptions {
 #[serde(rename_all = "lowercase")]
 pub enum Phase {
     Listing,
-    Details,
     Saving,
     Done,
     Error,
@@ -202,6 +179,28 @@ pub struct ReadProgress {
     pub items_seen: u64,
     pub current_path: Option<String>,
     pub message: Option<String>,
+    /// Espaço real ocupado (alocado) somado até agora; arquivos só na nuvem contam 0.
+    pub bytes_seen: u64,
+    /// Espaço ocupado do volume no início (capacidade − livre); 0 se desconhecido.
+    pub bytes_expected: u64,
+    /// `current_path` está numa pasta de nuvem (CloudStorage, Mobile Documents).
+    pub in_cloud: bool,
+}
+
+impl ReadProgress {
+    /// Progresso "vazio" (sem bytes), para erros e testes.
+    pub fn new(disk_uuid: String, phase: Phase, items_seen: u64, message: Option<String>) -> Self {
+        ReadProgress {
+            disk_uuid,
+            phase,
+            items_seen,
+            current_path: None,
+            message,
+            bytes_seen: 0,
+            bytes_expected: 0,
+            in_cloud: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

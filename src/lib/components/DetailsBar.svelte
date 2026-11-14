@@ -1,11 +1,10 @@
 <script lang="ts">
   import { S, diskById, revealSelected } from "$lib/store.svelte";
   import { t, locale } from "$lib/i18n";
-  import { formatBytes, formatDate, formatDuration, formatResolution } from "$lib/format";
+  import { formatBytes, formatDate } from "$lib/format";
 
   const it = $derived(S.selItem);
   const disk = $derived(it ? diskById(it.diskId) : null);
-  const v = $derived(it?.video);
 </script>
 
 <div class="bar">
@@ -19,10 +18,6 @@
         <span>{$t("details.size")}: {formatBytes(it.sizeBytes, $locale)}</span>
         <span>{$t("details.created")}: {formatDate(it.createdAt, $locale)}</span>
         <span>{$t("details.modified")}: {formatDate(it.modifiedAt, $locale)}</span>
-        {#if v}
-          <span>{$t("details.video")}: {[formatDuration(v.durationSec), formatResolution(v), v.codec, v.fps ? `${v.fps} fps` : ""].filter(Boolean).join(" · ")}</span>
-        {/if}
-        {#if it.insideArchive}<span>({$t("details.inArchive")})</span>{/if}
       </div>
     </div>
     <div class="act">

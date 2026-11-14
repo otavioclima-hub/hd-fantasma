@@ -19,6 +19,8 @@ pub struct Entry {
     pub is_dir: bool,
     /// Tamanho lógico (só arquivos).
     pub size: u64,
+    /// Espaço realmente ocupado no disco (só arquivos; 0 se só existe na nuvem). Só o progresso usa.
+    pub alloc: u64,
     pub created: Option<i64>,
     pub modified: Option<i64>,
     /// Arquivo que só existe na nuvem: nunca deve ser aberto (ADR 0011).
@@ -84,6 +86,7 @@ pub fn list_std(dir: &Path) -> Option<Listing> {
             raw_name,
             is_dir: ft.is_dir(),
             size: if ft.is_dir() { 0 } else { md.len() },
+            alloc: if ft.is_dir() || md_flags(&md) & SF_DATALESS != 0 { 0 } else { md_alloc(&md) },
             created: secs(md.created()),
             modified: secs(md.modified()),
             dataless: !ft.is_dir() && md_flags(&md) & SF_DATALESS != 0,
@@ -111,6 +114,17 @@ fn md_flags(_md: &std::fs::Metadata) -> u32 {
     0
 }
 
+/// Espaço alocado no disco: `st_blocks * 512` no unix; tamanho lógico nos outros sistemas.
+#[cfg(unix)]
+fn md_alloc(md: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    md.blocks() * 512
+}
+#[cfg(not(unix))]
+fn md_alloc(md: &std::fs::Metadata) -> u64 {
+    md.len()
+}
+
 #[cfg(unix)]
 pub fn md_dev(md: &std::fs::Metadata) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
@@ -126,7 +140,7 @@ mod bulk {
     use super::{Entry, Listing, SF_DATALESS, md_dev};
     use libc::{
         ATTR_BIT_MAP_COUNT, ATTR_CMN_CRTIME, ATTR_CMN_FLAGS, ATTR_CMN_MODTIME, ATTR_CMN_NAME,
-        ATTR_CMN_OBJTYPE, ATTR_CMN_RETURNED_ATTRS, ATTR_FILE_DATALENGTH, FSOPT_PACK_INVAL_ATTRS,
+        ATTR_CMN_OBJTYPE, ATTR_CMN_RETURNED_ATTRS, ATTR_FILE_ALLOCSIZE, ATTR_FILE_DATALENGTH, FSOPT_PACK_INVAL_ATTRS,
         attrlist,
     };
     use std::ffi::{CString, OsString};
@@ -180,7 +194,7 @@ mod bulk {
                 | ATTR_CMN_FLAGS,
             volattr: 0,
             dirattr: 0,
-            fileattr: ATTR_FILE_DATALENGTH,
+            fileattr: ATTR_FILE_ALLOCSIZE | ATTR_FILE_DATALENGTH,
             forkattr: 0,
         };
         // u64 só para garantir alinhamento do buffer.
@@ -235,7 +249,7 @@ mod bulk {
 
     /// Registro: `u32 length`, `attribute_set_t` (5 x u32), o erro (u32, se pedido) e então, na ordem dos bits:
     /// NAME (attrreference_t, 8), OBJTYPE (4), CRTIME (timespec, 16), MODTIME (16),
-    /// FLAGS (4), DATALENGTH (off_t, 8). Com `FSOPT_PACK_INVAL_ATTRS` o espaço de cada
+    /// FLAGS (4), ALLOCSIZE (off_t, 8), DATALENGTH (off_t, 8). Com `FSOPT_PACK_INVAL_ATTRS` o espaço de cada
     /// atributo existe sempre; o conjunto devolvido diz quais valem de fato.
     fn parse(rec: &[u8], dir: &Path) -> Parsed {
         let ret_common = rd32(rec, 4);
@@ -250,7 +264,7 @@ mod bulk {
             o += 4;
         }
         // NAME
-        if ret_common & ATTR_CMN_NAME == 0 || rec.len() < o + 8 + 4 + 32 + 4 + 8 {
+        if ret_common & ATTR_CMN_NAME == 0 || rec.len() < o + 8 + 4 + 32 + 4 + 8 + 8 {
             return Parsed::Bad;
         }
         let name_ref = o;
@@ -265,6 +279,9 @@ mod bulk {
         o += 16;
         let flags = rd32(rec, o);
         o += 4;
+        // Bits do fileattr em ordem crescente: ALLOCSIZE (0x4) vem antes de DATALENGTH (0x200).
+        let alloclen = rd64(rec, o);
+        o += 8;
         let datalen = rd64(rec, o);
 
         let start = name_ref as i64 + name_off as i64;
@@ -306,6 +323,14 @@ mod bulk {
             raw_name,
             is_dir,
             size: if !is_dir && ret_file & ATTR_FILE_DATALENGTH != 0 { datalen.max(0) as u64 } else { 0 },
+            alloc: if !is_dir
+                && ret_file & ATTR_FILE_ALLOCSIZE != 0
+                && !(ret_common & ATTR_CMN_FLAGS != 0 && flags & SF_DATALESS != 0)
+            {
+                alloclen.max(0) as u64
+            } else {
+                0
+            },
             created: if ret_common & ATTR_CMN_CRTIME != 0 { Some(crtime) } else { None },
             modified: if ret_common & ATTR_CMN_MODTIME != 0 { Some(modtime) } else { None },
             dataless: !is_dir && ret_common & ATTR_CMN_FLAGS != 0 && flags & SF_DATALESS != 0,
@@ -348,6 +373,10 @@ mod tests {
         let slow = list_std(p).unwrap();
         assert_eq!(fast.entries.len(), 705);
         assert_eq!(brief(&fast), brief(&slow));
+        // O espaço alocado também bate entre os dois caminhos (e não é zero para arquivos com conteúdo).
+        let allocs = |l: &Listing| -> BTreeMap<String, u64> { l.entries.iter().map(|e| (e.name.clone(), e.alloc)).collect() };
+        assert_eq!(allocs(&fast), allocs(&slow));
+        assert!(fast.entries.iter().find(|e| e.name == "a.txt").unwrap().alloc >= 1234);
         assert!(!fast.entries.iter().any(|e| e.name.starts_with("link")), "links são ignorados");
         let dir = fast.entries.iter().find(|e| e.name == "pasta").unwrap();
         assert!(dir.is_dir && dir.dev.is_some());

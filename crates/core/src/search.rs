@@ -121,8 +121,7 @@ impl Catalog {
             .ok_or_else(|| Error::msg("Item não encontrado no catálogo."))
     }
 
-    /// Mesmo nome + mesmo tamanho (ADR 0007). Só arquivos (não pastas, não conteúdo
-    /// compactado), tamanho >= `min_bytes`, nos discos escolhidos (vazio = todos).
+    /// Mesmo nome + mesmo tamanho (ADR 0007). Só arquivos (não pastas), tamanho >= `min_bytes`, nos discos escolhidos (vazio = todos).
     /// Grupos do maior para o menor, no máximo 1000.
     pub fn find_duplicates(&self, disk_ids: &[i64], min_bytes: u64) -> Result<Vec<DuplicateGroup>> {
         let mut args: Vec<Value> = vec![Value::Integer(min_bytes as i64)];
@@ -134,7 +133,7 @@ impl Catalog {
         };
         let sql = format!(
             "SELECT name, size_bytes FROM items
-             WHERE kind != 'folder' AND inside_archive = 0 AND size_bytes >= ?1 {disk_clause}
+             WHERE kind != 'folder' AND size_bytes >= ?1 {disk_clause}
              GROUP BY name, size_bytes HAVING COUNT(*) > 1
              ORDER BY size_bytes DESC, name COLLATE NOCASE LIMIT {MAX_DUP_GROUPS}"
         );
@@ -145,7 +144,7 @@ impl Catalog {
 
         let item_sql = format!(
             "SELECT {ITEM_COLS} FROM items i
-             WHERE i.name=?1 AND i.size_bytes=?2 AND i.kind != 'folder' AND i.inside_archive=0 {}
+             WHERE i.name=?1 AND i.size_bytes=?2 AND i.kind != 'folder' {}
              ORDER BY i.disk_id, i.path",
             if disk_ids.is_empty() {
                 String::new()
@@ -166,16 +165,9 @@ impl Catalog {
         Ok(out)
     }
 
-    /// Caminho real do item no disco presente. Item dentro de .zip/.rar resolve para o
-    /// próprio arquivo compactado.
+    /// Caminho real do item no disco presente.
     pub fn resolve_item_path(&self, id: i64, mounted: &[MountedVolume]) -> Result<PathBuf> {
-        let mut item = self.get_item(id)?;
-        while item.inside_archive {
-            match item.parent_id {
-                Some(p) => item = self.get_item(p)?,
-                None => break,
-            }
-        }
+        let item = self.get_item(id)?;
         let disk = self.get_disk(item.disk_id)?;
         let vol = mounted
             .iter()

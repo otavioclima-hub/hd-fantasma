@@ -15,14 +15,6 @@ export interface Disk {
   mountPath: string | null;
 }
 
-export interface VideoInfo {
-  durationSec: number | null;
-  width: number | null;
-  height: number | null;
-  codec: string | null;
-  fps: number | null;
-}
-
 export interface Item {
   id: number;
   diskId: number;
@@ -34,9 +26,7 @@ export interface Item {
   sizeBytes: number;
   createdAt: string | null;
   modifiedAt: string | null;
-  insideArchive: boolean;
   childCount: number;
-  video: VideoInfo | null;
 }
 
 export interface SearchQuery {
@@ -79,10 +69,13 @@ export interface ReadOptions {
 
 export interface ReadProgress {
   diskUuid: string;
-  phase: "listing" | "details" | "saving" | "done" | "error";
+  phase: "listing" | "saving" | "done" | "error";
   itemsSeen: number;
   currentPath: string | null;
   message: string | null;
+  bytesSeen: number;      // espaço real ocupado (alocado) somado até agora; nuvem-only = 0
+  bytesExpected: number;  // espaço ocupado do volume no início (capacidade − livre); 0 = desconhecido
+  inCloud: boolean;       // currentPath está numa pasta de nuvem
 }
 
 export interface Settings {

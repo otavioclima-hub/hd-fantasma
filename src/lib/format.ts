@@ -1,4 +1,4 @@
-import type { Item, VideoInfo } from "./types";
+import type { Item } from "./types";
 
 export function formatBytes(n: number, locale = "pt-BR"): string {
   if (!isFinite(n) || n <= 0) return "0 B";
@@ -18,20 +18,6 @@ export function formatDate(iso: string | null, locale = "pt-BR", withTime = true
   const d = new Date(iso);
   if (isNaN(d.getTime())) return "—";
   return new Intl.DateTimeFormat(locale, withTime ? { dateStyle: "short", timeStyle: "short" } : { dateStyle: "medium" }).format(d);
-}
-
-export function formatDuration(sec: number | null | undefined): string {
-  if (sec == null) return "";
-  const s = Math.round(sec);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const r = s % 60;
-  const pad = (x: number) => String(x).padStart(2, "0");
-  return h > 0 ? `${h}:${pad(m)}:${pad(r)}` : `${pad(m)}:${pad(r)}`;
-}
-
-export function formatResolution(v: VideoInfo | null): string {
-  return v && v.width && v.height ? `${v.width}×${v.height}` : "";
 }
 
 export function parentPath(item: Item): string {

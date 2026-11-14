@@ -1,4 +1,4 @@
-//! Mede a velocidade da Leitura numa pasta (catálogo temporário, sem ffprobe).
+//! Mede a velocidade da Leitura numa pasta (catálogo temporário).
 //! Uso: cargo run --release -p hdf-core --example bench -- <pasta> [segundos-máximos]
 //! Se o tempo máximo estourar, cancela a leitura e mostra quantos itens já tinham sido vistos.
 use hdf_core::*;
@@ -50,8 +50,8 @@ fn main() {
             last_phase = p.phase;
         };
         let r = match threads {
-            Some(n) => read_disk_threads(&mut cat, &vol, &opts, &NoopExtractor, &cancel, &mut on_progress, n),
-            None => read_disk_as(&mut cat, &vol, &opts, &NoopExtractor, &cancel, &mut on_progress),
+            Some(n) => read_disk_threads(&mut cat, &vol, &opts, &cancel, &mut on_progress, n),
+            None => read_disk_as(&mut cat, &vol, &opts, &cancel, &mut on_progress),
         };
         // libera o vigia
         cancel.store(true, Ordering::Relaxed);

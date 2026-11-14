@@ -6,11 +6,10 @@ Decisões tomadas com o Otavio em 2026-11-14 (4 rodadas de perguntas). O porquê
 
 - Ler discos presentes: HD/SSD externo, disco interno, pen drive, cartão, NAS. Qualquer formatação que o sistema monte (ADR 0004).
 - Guardar de cada item: nome, extensão/tipo, tamanho, datas (criação, modificação), caminho relativo ao disco.
-- Dados de vídeo via ffprobe embutido: duração, largura×altura, codec, fps.
-- Conteúdo compactado: .zip e .rar.
+- O app nunca abre arquivos (ADR 0013): sem dados de vídeo e sem conteúdo de .zip/.rar.
 - Ignorar arquivos de sistema por padrão (.DS_Store, Thumbs.db, .Spotlight-V100, .Trashes, .fseventsd, $RECYCLE.BIN, System Volume Information, ._*), com opção de incluir.
 - Tela em 3 colunas (discos | pastas | itens) + barra de busca.
-- Busca em todos os discos, com filtros: tipo (vídeo/imagem/áudio/documento/compactado/outro), tamanho mín/máx, data, discos escolhidos.
+- Busca em todos os discos, com filtros: tipo pela extensão (vídeo/imagem/áudio/documento/compactado/outro), tamanho mín/máx, data, discos escolhidos.
 - Navegar disco ausente.
 - Duplicados (nome + tamanho, ADR 0007).
 - Atualização rápida + releitura completa (ADR 0006).

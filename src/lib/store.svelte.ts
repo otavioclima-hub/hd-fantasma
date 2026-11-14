@@ -23,8 +23,6 @@ export const S = $state({
   trail: [] as Item[],
   rows: [] as Item[],
   rowsLoading: false,
-  tableChildren: {} as Record<number, Item[]>,
-  tableExpanded: {} as Record<number, boolean>,
   sort: { key: "name", dir: 1 } as { key: string; dir: 1 | -1 },
   selItem: null as Item | null,
 
@@ -126,8 +124,6 @@ export async function selectDisk(id: number) {
   S.rootItems = null;
   S.treeChildren = {};
   S.expanded = {};
-  S.tableChildren = {};
-  S.tableExpanded = {};
   S.selItem = null;
   try {
     S.rootItems = await api.listChildren(id, null);
@@ -156,8 +152,6 @@ export async function openFolder(folder: Item | null, opts: { keepSearch?: boole
   if (S.view === "dup") S.view = "browse";
   S.folderId = folder?.id ?? null;
   S.rowsLoading = true;
-  S.tableChildren = {};
-  S.tableExpanded = {};
   S.selItem = opts.select ?? folder;
   if (!opts.keepSearch) clearSearchFields();
   try {
@@ -181,19 +175,9 @@ export async function goUp() {
   await openFolder(parent, { keepSearch: true });
 }
 
-export async function toggleRowArchive(item: Item) {
-  if (S.tableExpanded[item.id]) { S.tableExpanded[item.id] = false; return; }
-  if (!S.tableChildren[item.id]) {
-    try { S.tableChildren[item.id] = await api.listChildren(item.diskId, item.id); } catch (e) { fail(e); return; }
-  }
-  S.tableExpanded[item.id] = true;
-}
-
-export const expandable = (i: Item) => i.kind === "archive" || (i.insideArchive && i.kind === "folder") ? i.childCount > 0 : false;
-
 /** Duplo clique / Enter numa linha. */
 export async function activate(item: Item) {
-  if (isDir(item) && !item.insideArchive) {
+  if (isDir(item)) {
     if (S.selDiskId !== item.diskId) {
       S.selDiskId = item.diskId;
       S.rootItems = await api.listChildren(item.diskId, null).catch((e) => (fail(e), null));
@@ -201,8 +185,6 @@ export async function activate(item: Item) {
       S.expanded = {};
     }
     await openFolder(item);
-  } else if (expandable(item)) {
-    await toggleRowArchive(item);
   } else if (searchActive()) {
     await gotoResult(item, true);
   }

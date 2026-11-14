@@ -9,8 +9,6 @@ use tauri::{AppHandle, Emitter, State};
 
 struct AppState {
     catalog_path: PathBuf,
-    /// ffprobe achado na abertura (sidecar, PATH ou lugares comuns); `None` = sem dados de vídeo.
-    ffprobe: Option<PathBuf>,
     cancel: Arc<AtomicBool>,
     reading: Arc<AtomicBool>,
 }
@@ -69,13 +67,12 @@ async fn read_disk(
     }
     state.cancel.store(false, Ordering::SeqCst);
     let (path, cancel, reading) = (state.catalog_path.clone(), state.cancel.clone(), state.reading.clone());
-    let extractor = RealExtractor::new(state.ffprobe.clone());
     let result = blocking(move || {
         let mut cat = Catalog::open(path).map_err(err)?;
         let vol = volumes::identify(std::path::Path::new(&mount_path)).map_err(err)?;
         let uuid = vol.uuid.clone();
         let emitter = app.clone();
-        let r = read_disk_as(&mut cat, &vol, &options, &extractor, &cancel, &mut |p| {
+        let r = read_disk_as(&mut cat, &vol, &options, &cancel, &mut |p| {
             let _ = emitter.emit("read-progress", p);
         });
         match r {
@@ -83,13 +80,7 @@ async fn read_disk(
             Err(e) => {
                 let _ = app.emit(
                     "read-progress",
-                    ReadProgress {
-                        disk_uuid: uuid,
-                        phase: Phase::Error,
-                        items_seen: 0,
-                        current_path: None,
-                        message: Some(e.to_string()),
-                    },
+                    ReadProgress::new(uuid, Phase::Error, 0, Some(e.to_string())),
                 );
                 Err(err(e))
             }
@@ -209,13 +200,11 @@ pub fn run() {
     let catalog_path = hdf_core::db::default_catalog_path().expect("pasta Documentos não encontrada");
     // Cria a pasta e o esquema já na abertura do app.
     Catalog::open(&catalog_path).expect("não foi possível abrir o catálogo");
-    let ffprobe = find_ffprobe(None);
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             catalog_path,
-            ffprobe,
             cancel: Arc::new(AtomicBool::new(false)),
             reading: Arc::new(AtomicBool::new(false)),
         })

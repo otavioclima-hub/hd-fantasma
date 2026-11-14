@@ -1,3 +1,6 @@
+---
+status: superseded by ADR-0013
+---
 # .rar pelo `unrar-ng`, .zip pelo crate `zip`; ffprobe como programa à parte
 
 Para listar o conteúdo compactado (só listar, nunca extrair) usamos o crate `zip` (MIT) para .zip e o `unrar-ng` (MIT ou Apache-2.0, versão mantida do `unrar`) para .rar. Compila no Mac e no Windows só com o compilador de C++ que o Rust já exige, sem instalar nada no sistema; testado com arquivos .rar reais (RAR 2.x/3.x/5). Os crates em Rust puro para RAR (`rars`, `rar`) são novos ou incompletos e leem menos variações do formato, e ler RAR de forma confiável é o ponto mais frágil.
