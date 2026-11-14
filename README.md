@@ -1,7 +1,113 @@
-# Tauri + SvelteKit + TypeScript
+<p align="center"><img src="design/icone-1024.png" alt="Ícone do HD Fantasma" width="160"></p>
 
-This template should help get you started developing with Tauri, SvelteKit and TypeScript in Vite.
+<h1 align="center">HD Fantasma</h1>
 
-## Recommended IDE Setup
+<p align="center"><b>Encontre arquivos nos seus HDs sem precisar plugá-los.</b><br>
+<a href="README.en.md">English version</a></p>
 
-[VS Code](https://code.visualstudio.com/) + [Svelte](https://marketplace.visualstudio.com/items?itemName=svelte.svelte-vscode) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer).
+---
+
+## O que é
+
+Quem trabalha com vídeo, foto, áudio e design acaba com uma gaveta cheia de HDs, SSDs, pen drives e cartões. Na hora de achar "aquele arquivo do cliente", ninguém lembra em qual disco ele está.
+
+O **HD Fantasma** faz uma lista de tudo o que existe em cada disco (nomes, tamanhos, datas e pastas) e guarda no seu computador. Depois, você pesquisa nessa lista **com o disco guardado na gaveta** e descobre em qual deles o arquivo está. É como ter o "fantasma" de cada HD sempre à mão.
+
+<!-- Capturas de tela: ainda não incluídas. Quando existirem, colocar em docs/img/ e mostrar aqui. -->
+
+## O que ele faz
+
+- **Lê discos** (HD, SSD, pen drive, cartão, disco interno, NAS) e guarda a lista no catálogo.
+- **Mostra o catálogo de duas formas:** em colunas (discos, pastas e itens) ou em lista.
+- **Painel de informações** de cada arquivo ou pasta: nome, tipo, tamanho, datas e caminho.
+- **Busca em todos os discos de uma vez**, com filtros: tipo (vídeo, imagem, áudio, documento, compactado), tamanho, data e discos escolhidos.
+- **Navega em disco ausente:** o disco desplugado continua aparecendo e dá para abrir as pastas dele.
+- **Acha duplicados:** arquivos com o mesmo nome e o mesmo tamanho, em qualquer disco.
+- **Ler de novo:** um botão que refaz a lista de um disco quando você mexeu nele.
+- **Exportar e importar** o catálogo de um disco (arquivo `.hdfantasma`), para mandar a outra pessoa.
+- **Funciona com o Claude** (via MCP): você pergunta em português, "onde está o arquivo X?", e o Claude consulta o catálogo.
+- Em **português e inglês**.
+
+## O que ele NÃO faz (de propósito)
+
+- **Nunca abre os seus arquivos.** Só lê o que o sistema informa: nome, tamanho, datas e pastas. Não olha dentro de vídeos, fotos ou arquivos .zip.
+- **Nunca usa a internet.** Não envia nada para ninguém, não tem conta e nem checa atualização sozinho.
+- **Nunca escreve nos seus discos.** Ele só lê. O catálogo fica no seu computador.
+- **Pastas de nuvem (Google Drive, Dropbox, iCloud):** entra só o que já está baixado no Mac. Ele nunca baixa nada da nuvem.
+
+## Baixar e instalar (Mac)
+
+1. Abra a página de [Releases do projeto no GitHub](https://github.com/otavioclima-hub/hd-fantasma/releases) e baixe o arquivo **`.dmg`** da versão mais nova.
+2. Dê dois cliques no `.dmg`. Vai abrir uma janela.
+3. **Arraste o HD Fantasma para a pasta Aplicativos.**
+4. Siga o passo "Primeira vez que abrir" abaixo.
+
+### Primeira vez que abrir (aviso do macOS)
+
+O app ainda **não é assinado pela Apple** (a assinatura é paga e feita por empresas). Por isso o Mac mostra um aviso na primeira vez. O app é seguro: o código é aberto, e dá para conferir tudo aqui. Você só precisa dizer ao Mac que confia nele, uma única vez.
+
+**macOS 15 (Sequoia) ou mais novo:**
+
+1. Abra o HD Fantasma pela pasta Aplicativos. Vai aparecer um aviso dizendo que o app não pôde ser verificado. Clique em **OK** (ou **Concluído**).
+2. Abra o menu da maçã (canto superior esquerdo da tela) → **Ajustes do Sistema** → **Privacidade e Segurança**.
+3. Role até a parte de baixo, onde aparece a mensagem sobre o "HD Fantasma", e clique em **Abrir Mesmo Assim**.
+4. Digite sua senha do Mac (ou use o Touch ID) e confirme em **Abrir**.
+
+Pronto: nas próximas vezes ele abre normalmente.
+
+**macOS mais antigo (14 ou anterior):**
+
+1. Na pasta Aplicativos, **clique com o botão direito** (ou Control + clique) no HD Fantasma e escolha **Abrir**.
+2. No aviso, clique em **Abrir** de novo.
+
+## Onde fica o catálogo
+
+No seu Mac, em **Documentos → HD Fantasma → `catalogo.sqlite`**. É um arquivo só. Para fazer cópia de segurança, copie esse arquivo.
+
+## Usar com o Claude
+
+O HD Fantasma pode conversar com o Claude, para você perguntar coisas como "quais vídeos com mais de 2 GB eu tenho nos meus HDs?". Em resumo: abra o app uma vez e leia um disco, depois acrescente o HD Fantasma nas configurações do Claude Desktop (ou do Claude Code). O passo a passo completo, com os textos para copiar, está em **[docs/MCP.md](docs/MCP.md)**.
+
+## Perguntas frequentes
+
+**Tem para Windows?**
+Em breve. O Mac vem primeiro.
+
+**Meu HD foi formatado no Mac e quero ler no Windows.**
+O Windows não entende o formato do Mac sozinho. Existem programas que ensinam isso ao Windows, como o Paragon APFS/HFS+ for Windows. Se o Windows enxergar o disco, o HD Fantasma também lê.
+
+**Por que o app não se atualiza sozinho?**
+Porque ele não usa a internet de jeito nenhum (veja [a decisão](docs/adr/0015-app-sem-internet.md)). Quando sair uma versão nova, é só baixar o `.dmg` de novo na página de Releases e arrastar para Aplicativos, substituindo o antigo. O catálogo não se perde.
+
+**Ele apaga ou muda meus arquivos?**
+Não. Ele só lê nome, tamanho, datas e pastas.
+
+**O que acontece com um disco que eu desplugo?**
+Ele continua no catálogo, marcado como ausente. Dá para navegar e pesquisar nele normalmente.
+
+## Para quem desenvolve
+
+- **Tecnologias:** [Tauri 2](https://tauri.app) (Rust), SvelteKit + TypeScript nas telas, SQLite (com FTS5) para o catálogo.
+- **Estrutura:** `crates/core` (biblioteca: banco, leitura de disco, busca, duplicados, exportação), `crates/mcp` (executável `hd-fantasma-mcp`), `src-tauri` (app), `src` (telas).
+- **Rodar em desenvolvimento** (precisa de Rust e Node):
+
+  ```bash
+  npm install
+  scripts/build-mcp-sidecar.sh   # o Tauri exige o MCP compilado antes
+  npm run tauri dev
+  ```
+
+- **Testes:** `cargo test --workspace` e `npm run check`.
+- **Gerar o instalador do Mac (universal, Apple Silicon + Intel):**
+
+  ```bash
+  scripts/build-release-mac.sh
+  ```
+
+  Ele compila o MCP (`scripts/build-mcp-sidecar.sh --universal`), roda `npm run tauri build -- --target universal-apple-darwin --bundles app,dmg` e confere que o `.app` tem os dois programas em formato universal.
+- **Licenças de terceiros:** `python3 scripts/gen-third-party-licenses.py` refaz o `THIRD_PARTY_LICENSES.md`.
+- **Decisões do projeto:** [`docs/adr/`](docs/adr/). **Vocabulário:** [`CONTEXT.md`](CONTEXT.md). **Plano:** [`PLANO.md`](PLANO.md).
+
+## Licença e autor
+
+[MIT](LICENSE). Feito por **Otavio Lima**. As bibliotecas de terceiros usadas estão listadas em [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
