@@ -38,12 +38,12 @@
       {#each nodes as n (n.item.id)}
         {@const it = n.item}
         <!-- svelte-ignore a11y_click_events_have_key_events -->
-        <div class="row" class:sel={S.folderId === it.id} style="padding-left:{6 + (n.depth + 1) * 14}px" role="treeitem"
+        <div class="row" class:sel={S.folderId === it.id} style="padding-left:{6 + (n.depth + 1) * 18}px" role="treeitem"
              aria-selected={S.folderId === it.id} aria-expanded={S.expanded[it.id] ?? false} tabindex="-1"
              onclick={() => openFolder(it)} ondblclick={() => toggleTree(it)}>
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
           <span class="tw" class:open={S.expanded[it.id]} class:hidden={it.childCount === 0} title={$t("expand")}
-                onclick={(e) => { e.stopPropagation(); toggleTree(it); }}>▸</span>
+                onclick={(e) => { e.stopPropagation(); toggleTree(it); }}><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
           <KindIcon kind="folder" size={15} />
           <span class="ellipsis">{it.name}</span>
           {#if S.treeLoading[it.id]}<span class="muted">…</span>{/if}
@@ -61,7 +61,8 @@
   .row { display: flex; align-items: center; gap: 5px; height: var(--row-h); padding-right: 8px; white-space: nowrap; }
   .row:hover { background: var(--bg-2); }
   .row.sel { background: var(--sel); }
-  .tw { width: 14px; text-align: center; color: var(--fg-2); font-size: 10px; transition: transform 0.1s; flex: none; }
+  .tw { width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center; color: var(--fg); border-radius: 5px; cursor: pointer; transition: transform 0.12s, background 0.12s; flex: none; }
+  .tw:hover { background: rgba(127,127,127,0.18); }
   .tw.open { transform: rotate(90deg); }
   .tw.hidden { visibility: hidden; }
 </style>
