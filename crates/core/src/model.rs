@@ -89,6 +89,8 @@ pub struct Item {
     pub created_at: Option<String>,
     pub modified_at: Option<String>,
     pub child_count: u64,
+    /// Pastas: total de itens dentro, recursivo; 0 nos demais.
+    pub descendant_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,11 +212,20 @@ pub enum Language {
     En,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ViewMode {
+    Columns,
+    List,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     pub language: Language,
     pub include_hidden: bool,
+    pub view_mode: ViewMode,
+    pub show_inspector: bool,
 }
 
 impl Default for Settings {
@@ -222,6 +233,8 @@ impl Default for Settings {
         Settings {
             language: Language::Pt,
             include_hidden: false,
+            view_mode: ViewMode::Columns,
+            show_inspector: true,
         }
     }
 }

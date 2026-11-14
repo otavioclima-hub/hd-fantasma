@@ -6,11 +6,11 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::path::{Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Colunas de `items` na ordem lida por [`row_to_item`].
 pub const ITEM_COLS: &str = "i.id, i.disk_id, i.parent_id, i.name, i.path, i.kind, i.ext, \
-    i.size_bytes, i.created_at, i.modified_at, i.child_count";
+    i.size_bytes, i.created_at, i.modified_at, i.child_count, i.descendant_count";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS items (
     size_bytes INTEGER NOT NULL DEFAULT 0,
     created_at TEXT,
     modified_at TEXT,
-    child_count INTEGER NOT NULL DEFAULT 0
+    child_count INTEGER NOT NULL DEFAULT 0,
+    descendant_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_items_parent ON items(disk_id, parent_id);
 CREATE INDEX IF NOT EXISTS idx_items_dup ON items(name, size_bytes);
@@ -144,6 +145,12 @@ impl Catalog {
                     total_bytes=(SELECT COALESCE(SUM(size_bytes),0) FROM items WHERE disk_id=disks.id AND kind!='folder')",
                 [],
             )?;
+        }
+        if v >= 1 {
+            // v3: total de itens dentro de cada pasta (`descendant_count`); calcula para o que já existe.
+            // (Catálogo novo já nasce com a coluna no SCHEMA.)
+            tx.execute("ALTER TABLE items ADD COLUMN descendant_count INTEGER NOT NULL DEFAULT 0", [])?;
+            recompute_descendants(&tx, None)?;
         }
         tx.execute("DELETE FROM schema_version", [])?;
         tx.execute("INSERT INTO schema_version(version) VALUES (?1)", [SCHEMA_VERSION])?;
@@ -410,6 +417,8 @@ impl Catalog {
                     ),
                     [offset],
                 )?;
+                // Exportações antigas não trazem `descendant_count`: recalcula para este disco.
+                recompute_descendants(&self.conn, Some(disk_id))?;
                 Ok(disk_id)
             })();
             match inner {
@@ -429,6 +438,42 @@ impl Catalog {
     }
 }
 
+/// Recalcula `descendant_count` das pastas (de um disco, ou de todos com `None`):
+/// cada item soma 1 em todas as pastas acima dele.
+pub fn recompute_descendants(conn: &Connection, disk_id: Option<i64>) -> Result<()> {
+    let mut parent: std::collections::HashMap<i64, Option<i64>> = std::collections::HashMap::new();
+    let mut folders: Vec<i64> = Vec::new();
+    {
+        let sql = if disk_id.is_some() {
+            "SELECT id, parent_id, kind FROM items WHERE disk_id=?1"
+        } else {
+            "SELECT id, parent_id, kind FROM items WHERE ?1 IS NULL"
+        };
+        let mut st = conn.prepare(sql)?;
+        let mut rows = st.query([disk_id])?;
+        while let Some(r) = rows.next()? {
+            let id: i64 = r.get(0)?;
+            parent.insert(id, r.get(1)?);
+            if r.get::<_, String>(2)? == "folder" {
+                folders.push(id);
+            }
+        }
+    }
+    let mut count: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    for (_, p) in parent.iter() {
+        let mut cur = *p;
+        while let Some(pid) = cur {
+            *count.entry(pid).or_default() += 1;
+            cur = parent.get(&pid).copied().flatten();
+        }
+    }
+    let mut upd = conn.prepare("UPDATE items SET descendant_count=?1 WHERE id=?2")?;
+    for id in folders {
+        upd.execute(params![count.get(&id).copied().unwrap_or(0), id])?;
+    }
+    Ok(())
+}
+
 pub fn row_to_item(r: &Row) -> rusqlite::Result<Item> {
     Ok(Item {
         id: r.get(0)?,
@@ -442,5 +487,6 @@ pub fn row_to_item(r: &Row) -> rusqlite::Result<Item> {
         created_at: r.get(8)?,
         modified_at: r.get(9)?,
         child_count: r.get::<_, i64>(10)? as u64,
+        descendant_count: r.get::<_, i64>(11)? as u64,
     })
 }

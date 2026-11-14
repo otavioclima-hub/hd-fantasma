@@ -70,6 +70,10 @@ fn scan_counts_sizes_and_ignores_system_files() {
     let projetos = &root[1];
     assert_eq!(projetos.size_bytes, 100 + 10 + 50 + 20);
     assert_eq!(projetos.child_count, 3);
+    // Projetos: 3 filhos diretos (2025, pacote.zip, Vídeo…) + 2 arquivos dentro de 2025 = 5
+    assert_eq!(projetos.descendant_count, 5);
+    assert_eq!(root[0].descendant_count, 2, "Backup: 2 arquivos");
+    assert_eq!(cat.list_children(disk.id, Some(projetos.id)).unwrap()[0].descendant_count, 2, "2025");
     let kids = cat.list_children(disk.id, Some(projetos.id)).unwrap();
     // pastas primeiro, depois nome
     assert_eq!(kids[0].name, "2025");
@@ -314,7 +318,48 @@ fn v1_catalog_is_migrated() {
         .unwrap();
     assert_eq!(cols, 0);
     let v: i64 = c.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 2);
+    assert_eq!(v, 3);
+    // v3: a coluna nova existe e foi calculada (pacote.zip tem 1 filho no catálogo antigo, que sumiu).
+    let dc: i64 = c.query_row("SELECT COUNT(*) FROM pragma_table_info('items') WHERE name='descendant_count'", [], |r| r.get(0)).unwrap();
+    assert_eq!(dc, 1);
+}
+
+/// Catálogo v2 (sem `descendant_count`) ganha a coluna e o valor certo ao abrir.
+#[test]
+fn v2_catalog_gets_descendant_counts() {
+    let store = tempfile::tempdir().unwrap();
+    let dbp = store.path().join("v2.sqlite");
+    {
+        let c = rusqlite::Connection::open(&dbp).unwrap();
+        c.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL);
+             INSERT INTO schema_version VALUES (2);
+             CREATE TABLE disks (id INTEGER PRIMARY KEY, uuid TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+               filesystem TEXT NOT NULL DEFAULT '', capacity_bytes INTEGER NOT NULL DEFAULT 0,
+               free_bytes INTEGER NOT NULL DEFAULT 0, item_count INTEGER NOT NULL DEFAULT 0,
+               total_bytes INTEGER NOT NULL DEFAULT 0, last_read_at TEXT NOT NULL);
+             CREATE TABLE items (id INTEGER PRIMARY KEY, disk_id INTEGER NOT NULL REFERENCES disks(id) ON DELETE CASCADE,
+               parent_id INTEGER, name TEXT NOT NULL, path TEXT NOT NULL, kind TEXT NOT NULL, ext TEXT,
+               size_bytes INTEGER NOT NULL DEFAULT 0, created_at TEXT, modified_at TEXT,
+               child_count INTEGER NOT NULL DEFAULT 0);
+             CREATE VIRTUAL TABLE items_fts USING fts5(name_norm, tokenize='trigram');
+             CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO disks VALUES (1,'u1','OLD','apfs',1000,500,4,3,'2025-01-01T00:00:00Z');
+             INSERT INTO items(id,disk_id,parent_id,name,path,kind,ext,size_bytes,child_count) VALUES
+               (1,1,NULL,'A','A','folder',NULL,3,2),
+               (2,1,1,'B','A/B','folder',NULL,2,1),
+               (3,1,2,'f.txt','A/B/f.txt','document','txt',2,0),
+               (4,1,1,'g.txt','A/g.txt','document','txt',1,0);",
+        )
+        .unwrap();
+    }
+    let cat = Catalog::open(&dbp).unwrap();
+    let root = cat.list_children(1, None).unwrap();
+    assert_eq!(root[0].descendant_count, 3, "B, f.txt e g.txt");
+    let b = cat.list_children(1, Some(1)).unwrap();
+    assert_eq!(b[0].name, "B");
+    assert_eq!(b[0].descendant_count, 1);
+    assert_eq!(b[1].descendant_count, 0, "arquivo");
 }
 
 #[test]
@@ -322,11 +367,17 @@ fn settings_roundtrip_and_json_shape() {
     let store = tempfile::tempdir().unwrap();
     let cat = Catalog::open(store.path().join("c.sqlite")).unwrap();
     assert_eq!(cat.get_settings().unwrap(), Settings::default());
-    cat.set_settings(&Settings { language: Language::En, include_hidden: true }).unwrap();
+    cat.set_settings(&Settings { language: Language::En, include_hidden: true, view_mode: ViewMode::List, show_inspector: false }).unwrap();
     assert_eq!(cat.get_settings().unwrap().language, Language::En);
     let json = serde_json::to_value(cat.get_settings().unwrap()).unwrap();
     assert_eq!(json["includeHidden"], true);
     assert_eq!(json["language"], "en");
+    assert_eq!(json["viewMode"], "list");
+    assert_eq!(json["showInspector"], false);
+    // Configuração gravada por versão antiga (sem os campos novos) continua valendo.
+    let old: Settings = serde_json::from_str(r#"{"language":"en","includeHidden":true}"#).unwrap();
+    assert_eq!(old.language, Language::En);
+    assert_eq!((old.view_mode, old.show_inspector), (ViewMode::Columns, true));
     // SearchQuery aceita JSON do contrato (camelCase)
     let sq: SearchQuery = serde_json::from_str(
         r#"{"text":"a","kinds":["video"],"minBytes":null,"maxBytes":5,"modifiedAfter":null,"modifiedBefore":null,"diskIds":[],"limit":500,"offset":0}"#,

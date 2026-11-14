@@ -12,19 +12,15 @@ export const S = $state({
   disks: [] as Disk[],
   selDiskId: null as number | null,
 
-  // árvore de pastas do disco selecionado
-  rootItems: null as Item[] | null,
-  treeChildren: {} as Record<number, Item[]>,
-  expanded: {} as Record<number, boolean>,
-  treeLoading: {} as Record<number, boolean>,
-
-  // pasta aberta (coluna 3 no modo navegação)
-  folderId: null as number | null,
-  trail: [] as Item[],
-  rows: [] as Item[],
-  rowsLoading: false,
-  sort: { key: "name", dir: 1 } as { key: string; dir: 1 | -1 },
+  // navegação: caminho selecionado (disco -> ... -> item selecionado) e pastas abertas na Lista
+  path: [] as Item[],
   selItem: null as Item | null,
+  expanded: {} as Record<number, boolean>,
+  loadingKids: {} as Record<string, boolean>,
+  listSort: { key: "name", dir: 1 } as { key: string; dir: 1 | -1 },
+
+  // tabela de resultados da busca
+  sort: { key: "name", dir: 1 } as { key: string; dir: 1 | -1 },
 
   // busca
   text: "",
@@ -49,7 +45,7 @@ export const S = $state({
   dupMin: 0,
   sheetOpen: false,
   settingsOpen: false,
-  settings: { language: "pt", includeHidden: false } as Settings,
+  settings: { language: "pt", includeHidden: false, viewMode: "columns", showInspector: true } as Settings,
   reading: false,
   readName: "",
   progress: null as ReadProgress | null,
@@ -110,85 +106,137 @@ export async function loadDisks() {
 
 function clearSelection() {
   S.selDiskId = null;
-  S.rootItems = null;
-  S.rows = [];
-  S.trail = [];
-  S.folderId = null;
+  S.path = [];
   S.selItem = null;
-}
-
-// ---------- discos, árvore e pasta ----------
-export async function selectDisk(id: number) {
-  if (S.selDiskId === id && S.rootItems) { await openFolder(null); return; }
-  S.selDiskId = id;
-  S.rootItems = null;
-  S.treeChildren = {};
   S.expanded = {};
-  S.selItem = null;
-  try {
-    S.rootItems = await api.listChildren(id, null);
-  } catch (e) { fail(e); }
-  await openFolder(null);
 }
 
-const isDir = (i: Item) => i.kind === "folder";
+// ---------- cache de pastas (fora do $state profundo: pastas podem ter 50 mil itens) ----------
+let kidsRaw = $state.raw<Record<string, Item[]>>({});
+const memo = new Map<number, Item>();
+const inflight = new Map<string, Promise<Item[]>>();
+const kidsKey = (diskId: number, parentId: number | null) => (parentId == null ? `r${diskId}` : String(parentId));
 
-export async function toggleTree(item: Item) {
+/** Filhos já carregados de uma pasta (undefined = ainda carregando). Reativo. */
+export const kidsOf = (diskId: number, parentId: number | null): Item[] | undefined => kidsRaw[kidsKey(diskId, parentId)];
+export const remember = (items: Item[]) => { for (const i of items) memo.set(i.id, i); };
+
+export function ensureKids(diskId: number, parentId: number | null): Promise<Item[]> {
+  const k = kidsKey(diskId, parentId);
+  const have = kidsRaw[k];
+  if (have) return Promise.resolve(have);
+  let p = inflight.get(k);
+  if (!p) {
+    S.loadingKids[k] = true;
+    p = api.listChildren(diskId, parentId)
+      .then((list) => { remember(list); kidsRaw = { ...kidsRaw, [k]: list }; return list; })
+      .catch((e) => { fail(e); return [] as Item[]; })
+      .finally(() => { inflight.delete(k); S.loadingKids[k] = false; });
+    inflight.set(k, p);
+  }
+  return p;
+}
+
+/** Esquece tudo o que foi carregado (depois de ler/remover/importar discos). */
+function resetNav() {
+  kidsRaw = {};
+  memo.clear();
+  inflight.clear();
+  S.expanded = {};
+  S.path = [];
+  S.selItem = null;
+}
+
+export const isDir = (i: Item) => i.kind === "folder";
+
+/** Pastas acima do item, da raiz até o pai. */
+async function ancestorsOf(item: Item): Promise<Item[]> {
+  const chain: Item[] = [];
+  let pid = item.parentId;
+  while (pid != null) {
+    let p = memo.get(pid);
+    if (!p) { p = await api.getItem(pid); memo.set(p.id, p); }
+    chain.unshift(p);
+    pid = p.parentId;
+  }
+  return chain;
+}
+
+// ---------- discos e navegação ----------
+export async function selectDisk(id: number) {
+  if (S.view === "dup") S.view = "browse";
+  clearSearchFields();
+  S.selDiskId = id;
+  S.path = [];
+  S.selItem = null;
+  S.expanded = {};
+  await ensureKids(id, null);
+}
+
+let navToken = 0;
+
+/** Seleciona um item (Lista ou busca) e mantém o caminho em dia para a vista de Colunas. */
+export async function selectItem(item: Item, opts: { reveal?: boolean } = {}) {
+  const tok = ++navToken;
+  S.selItem = item;
+  if (S.selDiskId !== item.diskId) { S.selDiskId = item.diskId; S.expanded = {}; }
+  try {
+    const anc = await ancestorsOf(item);
+    if (tok !== navToken) return;
+    // abre os pais na Lista e carrega o que as Colunas vão mostrar
+    await ensureKids(item.diskId, null);
+    for (const a of anc) {
+      await ensureKids(a.diskId, a.id);
+      if (opts.reveal) S.expanded[a.id] = true;
+    }
+    if (isDir(item)) await ensureKids(item.diskId, item.id);
+    if (tok !== navToken) return;
+    S.path = [...anc, item];
+  } catch (e) { fail(e); }
+}
+
+/** Clique numa linha da coluna `col` (vista de Colunas): as colunas à direita são trocadas. */
+export function pickInColumn(col: number, item: Item) {
+  ++navToken;
+  S.path = [...S.path.slice(0, col), item];
+  S.selItem = item;
+  if (isDir(item)) void ensureKids(item.diskId, item.id);
+}
+
+/** Seleciona o disco inteiro (sem item). */
+export function selectNothing() {
+  ++navToken;
+  S.path = [];
+  S.selItem = null;
+}
+
+export async function toggleExpand(item: Item) {
+  if (!isDir(item)) return;
   if (S.expanded[item.id]) { S.expanded[item.id] = false; return; }
-  await ensureTreeChildren(item);
+  await ensureKids(item.diskId, item.id);
   S.expanded[item.id] = true;
 }
 
-async function ensureTreeChildren(item: Item) {
-  if (S.treeChildren[item.id]) return;
-  S.treeLoading[item.id] = true;
-  try {
-    S.treeChildren[item.id] = await api.listChildren(item.diskId, item.id);
-  } catch (e) { fail(e); } finally { S.treeLoading[item.id] = false; }
-}
-
-/** Abre uma pasta na coluna 3 (null = raiz do disco). */
-export async function openFolder(folder: Item | null, opts: { keepSearch?: boolean; select?: Item | null } = {}) {
+/** Clique num resultado da busca: seleciona o item e leva as duas vistas até a pasta dele.
+ *  Com `leave`, sai da busca e mostra a vista de navegação. */
+export async function gotoResult(item: Item, leave = false) {
   if (S.view === "dup") S.view = "browse";
-  S.folderId = folder?.id ?? null;
-  S.rowsLoading = true;
-  S.selItem = opts.select ?? folder;
-  if (!opts.keepSearch) clearSearchFields();
-  try {
-    // trilha (migalhas): sobe pelos pais
-    const trail: Item[] = [];
-    let cur = folder;
-    while (cur) {
-      trail.unshift(cur);
-      cur = cur.parentId != null ? await api.getItem(cur.parentId) : null;
-    }
-    S.trail = trail;
-    for (const a of trail.slice(0, -1)) { await ensureTreeChildren(a); S.expanded[a.id] = true; }
-    if (folder && isDir(folder)) { await ensureTreeChildren(folder); S.expanded[folder.id] = true; }
-    S.rows = S.selDiskId != null ? await api.listChildren(S.selDiskId, folder?.id ?? null) : [];
-  } catch (e) { fail(e); } finally { S.rowsLoading = false; }
+  if (leave) clearSearchFields();
+  await selectItem(item, { reveal: true });
 }
 
-export async function goUp() {
-  if (!S.trail.length) return;
-  const parent = S.trail.length > 1 ? S.trail[S.trail.length - 2] : null;
-  await openFolder(parent, { keepSearch: true });
+async function revealSelectionInList() {
+  const anc = S.path.slice(0, -1);
+  for (const a of anc) { await ensureKids(a.diskId, a.id); S.expanded[a.id] = true; }
 }
 
-/** Duplo clique / Enter numa linha. */
-export async function activate(item: Item) {
-  if (isDir(item)) {
-    if (S.selDiskId !== item.diskId) {
-      S.selDiskId = item.diskId;
-      S.rootItems = await api.listChildren(item.diskId, null).catch((e) => (fail(e), null));
-      S.treeChildren = {};
-      S.expanded = {};
-    }
-    await openFolder(item);
-  } else if (searchActive()) {
-    await gotoResult(item, true);
-  }
+export async function setViewMode(mode: "columns" | "list") {
+  if (S.view === "dup") S.view = "browse";
+  if (S.settings.viewMode === mode) return;
+  await saveSettings({ viewMode: mode });
+  if (mode === "list") await revealSelectionInList();
 }
+export const toggleInspector = () => saveSettings({ showInspector: !S.settings.showInspector });
 
 // ---------- busca ----------
 export function clearSearchFields() {
@@ -221,6 +269,7 @@ export async function runSearch() {
   try {
     const r = await api.search(buildQuery(0));
     if (tok !== searchToken) return;
+    remember(r.items);
     S.results = r.items;
     S.total = r.total;
   } catch (e) { if (tok === searchToken) fail(e); } finally { if (tok === searchToken) S.searching = false; }
@@ -233,35 +282,10 @@ export async function loadMore() {
   try {
     const r = await api.search(buildQuery(S.results.length));
     if (tok !== searchToken) return;
+    remember(r.items);
     S.results.push(...r.items);
     S.total = r.total;
   } catch (e) { fail(e); } finally { S.loadingMore = false; }
-}
-
-/** Clique num resultado: seleciona o disco e a pasta dele; com `leave`, sai da busca. */
-export async function gotoResult(item: Item, leave = false) {
-  S.selItem = item;
-  if (S.selDiskId !== item.diskId) {
-    S.selDiskId = item.diskId;
-    S.treeChildren = {};
-    S.expanded = {};
-    try { S.rootItems = await api.listChildren(item.diskId, null); } catch (e) { fail(e); }
-  }
-  if (!leave) {
-    // só marca disco/pastas na árvore; a lista de resultados continua na coluna 3
-    try {
-      const chain: Item[] = [];
-      let cur: Item | null = item.parentId != null ? await api.getItem(item.parentId) : null;
-      while (cur) { chain.unshift(cur); cur = cur.parentId != null ? await api.getItem(cur.parentId) : null; }
-      for (const a of chain) { await ensureTreeChildren(a); S.expanded[a.id] = true; }
-      S.folderId = chain.length ? chain[chain.length - 1].id : null;
-      S.trail = chain;
-    } catch (e) { fail(e); }
-    return;
-  }
-  let parent: Item | null = null;
-  if (item.parentId != null) { try { parent = await api.getItem(item.parentId); } catch (e) { fail(e); } }
-  await openFolder(parent, { select: item });
 }
 
 // ---------- ações de disco ----------
@@ -274,6 +298,7 @@ export async function startRead(mountPath: string, name: string, options: ReadOp
     const d = await api.readDisk(mountPath, options);
     await loadDisks();
     toast(tr("toast.readDone", { name: d.name }));
+    resetNav();
     S.selDiskId = null;
     await selectDisk(d.id);
   } catch (e) { fail(e); } finally { S.reading = false; }
@@ -290,7 +315,7 @@ export async function renameDisk(d: Disk) {
 export async function removeDisk(d: Disk) {
   const ok = await askConfirm(tr("confirm.removeTitle", { name: d.name }), tr("confirm.removeText"), tr("remove"), true);
   if (!ok) return;
-  try { await api.deleteDisk(d.id); await loadDisks(); toast(tr("toast.removed")); if (searchActive()) runSearch(); } catch (e) { fail(e); }
+  try { await api.deleteDisk(d.id); resetNav(); await loadDisks(); toast(tr("toast.removed")); if (searchActive()) runSearch(); } catch (e) { fail(e); }
 }
 
 export async function exportDisk(d: Disk) {
@@ -307,6 +332,7 @@ export async function importCatalog() {
     const p = await api.pickOpenPath();
     if (!p) return;
     const d = await api.importDisk(p);
+    resetNav();
     await loadDisks();
     toast(tr("toast.imported"));
     await selectDisk(d.id);

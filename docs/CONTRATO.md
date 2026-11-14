@@ -34,7 +34,8 @@ interface Item {
   sizeBytes: number;         // pasta = soma recursiva
   createdAt: string | null;
   modifiedAt: string | null;
-  childCount: number;        // pastas; 0 nos demais
+  childCount: number;        // pastas: filhos diretos; 0 nos demais
+  descendantCount: number;   // pastas: total de itens dentro, recursivo; 0 nos demais
 }
 
 interface SearchQuery {
@@ -90,7 +91,7 @@ interface ReadProgress {
 | `export_disk` | `{ diskId: number, destPath: string }` | `void` |
 | `import_disk` | `{ srcPath: string }` | `Disk` |
 | `reveal_item` | `{ id: number }` | `void` (abre no Finder/Explorer se o disco estiver presente) |
-| `get_settings` / `set_settings` | `{ settings: { language: "pt" \| "en", includeHidden: boolean } }` | settings |
+| `get_settings` / `set_settings` | `{ settings: { language: "pt" \| "en", includeHidden: boolean, viewMode: "columns" \| "list", showInspector: boolean } }` | settings |
 
 Erros: string legível em pt-BR (ex.: `"O disco não está plugado."`).
 

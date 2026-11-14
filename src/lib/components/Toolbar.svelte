@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { S, searchActive, openDuplicates } from "$lib/store.svelte";
+  import { S, searchActive, openDuplicates, setViewMode, toggleInspector } from "$lib/store.svelte";
   import { t } from "$lib/i18n";
   import { isMock } from "$lib/api";
 
+  const isMac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform || navigator.userAgent);
   let { searchEl = $bindable() }: { searchEl?: HTMLInputElement } = $props();
   const nFilters = $derived(
     (S.kinds.length ? 1 : 0) + (S.minVal || S.maxVal ? 1 : 0) + (S.after || S.before ? 1 : 0) + (S.diskFilter.length ? 1 : 0),
@@ -21,10 +22,24 @@
   </button>
   <div class="grow"></div>
   {#if isMock}<span class="muted demo" title={$t("mock.banner")}>{$t("mock.banner")}</span>{/if}
+  <div class="seg" role="group" aria-label={$t("view.label")}>
+    <button class:on={S.settings.viewMode === "columns"} title={$t("view.columns")} aria-label={$t("view.columns")} aria-pressed={S.settings.viewMode === "columns"} onclick={() => setViewMode("columns")}>
+      <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M6 3v10M10.2 3v10" stroke="currentColor" stroke-width="1.4" /></svg>
+      <span>{$t("view.columns")}</span>
+    </button>
+    <button class:on={S.settings.viewMode === "list"} title={$t("view.list")} aria-label={$t("view.list")} aria-pressed={S.settings.viewMode === "list"} onclick={() => setViewMode("list")}>
+      <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 4h8M5.5 8h8M5.5 12h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /><circle cx="2.6" cy="4" r=".9" fill="currentColor" /><circle cx="2.6" cy="8" r=".9" fill="currentColor" /><circle cx="2.6" cy="12" r=".9" fill="currentColor" /></svg>
+      <span>{$t("view.list")}</span>
+    </button>
+  </div>
   <button class="btn" class:active={S.view === "dup"} onclick={() => (S.view === "dup" ? (S.view = "browse") : openDuplicates())}>{$t("duplicates")}</button>
   <button class="btn primary" onclick={() => (S.sheetOpen = true)}>{$t("readDisk")}</button>
   <button class="btn icon" title={$t("settings")} aria-label={$t("settings")} onclick={() => (S.settingsOpen = true)}>
     <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.3" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M12.6 3.4l-1.4 1.4M4.8 11.2l-1.4 1.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+  </button>
+  <button class="btn icon info" class:on={S.settings.showInspector} title={$t("inspector.toggle") + " (" + (isMac ? "⌘I" : "Ctrl+I") + ")"} aria-label={$t("inspector.toggle")}
+          aria-pressed={S.settings.showInspector} onclick={toggleInspector}>
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M10 3v10" stroke="currentColor" stroke-width="1.4" /><path d="M11.5 5.6h1M11.5 7.6h1M11.5 9.6h1" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" /></svg>
   </button>
 </div>
 
@@ -34,6 +49,15 @@
   .search { position: relative; flex: 0 1 380px; min-width: 160px; display: flex; align-items: center; }
   .search svg { position: absolute; left: 8px; color: var(--fg-2); pointer-events: none; }
   .search input { width: 100%; padding-left: 27px; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--bg-2); height: 26px; }
+  .seg button { display: inline-flex; align-items: center; gap: 5px; padding: 0 10px; border: 0; background: none; color: var(--fg-2); }
+  .seg button + button { border-left: 1px solid var(--border); }
+  .seg button:hover:not(.on) { background: var(--bg-3); }
+  .seg button.on { background: var(--accent-soft); color: var(--accent); }
+  @media (max-width: 1100px) { .seg span { display: none; } .seg button { padding: 0 8px; } }
+  .info { background: none; border-color: transparent; color: var(--fg-2); }
+  .info:hover:not(:disabled) { background: var(--bg-3); }
+  .info.on, .info.on:hover { background: var(--accent-soft); border-color: transparent; color: var(--accent); }
   .demo { font-size: 11px; padding-right: 4px; }
   @media (max-width: 1000px) { .demo { display: none; } }
 </style>

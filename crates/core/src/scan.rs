@@ -168,6 +168,7 @@ impl Shared<'_> {
             created_at: e.created.map(iso_from_unix),
             modified_at: e.modified.map(iso_from_unix),
             child_count: 0,
+            descendant_count: 0,
         })
     }
 }
@@ -263,6 +264,7 @@ fn process_job(sh: &Shared, job: &Job, tx: &SyncSender<Batch>, children: &mut Ve
                 created_at: e.created.map(iso_from_unix),
                 modified_at: e.modified.map(iso_from_unix),
                 child_count: 0,
+                descendant_count: 0,
             }));
             children.push(Job { dir: e.path_in(&job.dir), rel, id: Some(id) });
             count += 1;
@@ -547,14 +549,18 @@ impl<'a> Writer<'a> {
         let mut ids: Vec<i64> = self.dirs.keys().copied().collect();
         ids.sort_unstable();
         let mut sub: HashMap<i64, u64> = HashMap::new();
+        // Itens dentro de cada pasta (recursivo): filhos diretos + o que há dentro das pastas filhas.
+        let mut sub_items: HashMap<i64, u64> = HashMap::new();
         for &id in ids.iter().rev() {
             let a = &self.dirs[&id];
             let total = a.size + sub.remove(&id).unwrap_or(0);
+            let inside = a.count + sub_items.remove(&id).unwrap_or(0);
             if let Some(p) = a.parent {
                 *sub.entry(p).or_default() += total;
+                *sub_items.entry(p).or_default() += inside;
             }
             if total != 0 || a.count != 0 {
-                self.upd.execute(params![total as i64, a.count as i64, id])?;
+                self.upd.execute(params![total as i64, a.count as i64, inside as i64, id])?;
             }
         }
         Ok(())
@@ -690,7 +696,7 @@ fn read_disk_inner(
                 "INSERT INTO items(id,disk_id,parent_id,name,path,kind,ext,size_bytes,created_at,modified_at,child_count)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             )?,
-            upd: conn.prepare("UPDATE items SET size_bytes=?1, child_count=?2 WHERE id=?3")?,
+            upd: conn.prepare("UPDATE items SET size_bytes=?1, child_count=?2, descendant_count=?3 WHERE id=?4")?,
             del: conn.prepare("DELETE FROM items WHERE id=?1")?,
             uuid: vol.uuid.clone(),
             cancel,

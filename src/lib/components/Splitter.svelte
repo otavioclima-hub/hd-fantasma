@@ -1,17 +1,17 @@
 <script lang="ts">
-  let { value = $bindable(), min = 140, max = 520, onchange }: { value: number; min?: number; max?: number; onchange?: () => void } = $props();
+  let { value = $bindable(), min = 140, max = 520, onchange, reverse = false }: { value: number; min?: number; max?: number; onchange?: () => void; reverse?: boolean } = $props();
   function down(e: PointerEvent) {
     const startX = e.clientX, start = value;
     const el = e.currentTarget as HTMLElement;
     el.setPointerCapture(e.pointerId);
-    const move = (ev: PointerEvent) => { value = Math.max(min, Math.min(max, start + ev.clientX - startX)); };
+    const move = (ev: PointerEvent) => { const dx = ev.clientX - startX; value = Math.max(min, Math.min(max, start + (reverse ? -dx : dx))); };
     const up = () => { el.removeEventListener("pointermove", move); el.removeEventListener("pointerup", up); onchange?.(); };
     el.addEventListener("pointermove", move);
     el.addEventListener("pointerup", up);
   }
   function key(e: KeyboardEvent) {
-    if (e.key === "ArrowLeft") { value = Math.max(min, value - 12); onchange?.(); }
-    if (e.key === "ArrowRight") { value = Math.min(max, value + 12); onchange?.(); }
+    const d = e.key === "ArrowLeft" ? -12 : e.key === "ArrowRight" ? 12 : 0;
+    if (d) { value = Math.max(min, Math.min(max, value + (reverse ? -d : d))); onchange?.(); }
   }
 </script>
 

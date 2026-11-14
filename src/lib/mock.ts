@@ -139,14 +139,17 @@ function addNodes(diskId: number, parent: Item | null, nodes: N[]): number {
       id: nextId++, diskId, parentId: parent?.id ?? null, name: n.n,
       path: parent ? `${parent.path}/${n.n}` : n.n,
       kind, ext, sizeBytes: n.size ?? 0,
-      createdAt: n.mod ?? "2024-01-15T10:00:00Z", modifiedAt: n.mod ?? "2024-01-15T10:00:00Z",
-      childCount: n.kids?.length ?? 0,
+      createdAt: n.mod ? new Date(Date.parse(n.mod) - 3 * 86400000).toISOString() : "2024-01-15T10:00:00Z",
+      modifiedAt: n.mod ?? "2024-01-15T10:00:00Z",
+      childCount: n.kids?.length ?? 0, descendantCount: 0,
     };
     items.push(it);
     byId.set(it.id, it);
     list.push(it);
     if (n.kids) {
+      const before = items.length;
       it.sizeBytes = addNodes(diskId, it, n.kids);
+      it.descendantCount = items.length - before;
     }
     sum += it.sizeBytes;
   }
@@ -172,7 +175,7 @@ for (const s of SPECS) buildDisk(s.disk, s.tree);
 
 // ---------- API falsa ----------
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-let settings: Settings = { language: "pt", includeHidden: false };
+let settings: Settings = { language: "pt", includeHidden: false, viewMode: "columns", showInspector: true };
 const progressListeners = new Set<(p: ReadProgress) => void>();
 let cancelled = false;
 

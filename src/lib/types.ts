@@ -27,6 +27,7 @@ export interface Item {
   createdAt: string | null;
   modifiedAt: string | null;
   childCount: number;
+  descendantCount: number;
 }
 
 export interface SearchQuery {
@@ -81,4 +82,6 @@ export interface ReadProgress {
 export interface Settings {
   language: "pt" | "en";
   includeHidden: boolean;
+  viewMode: "columns" | "list";
+  showInspector: boolean;
 }

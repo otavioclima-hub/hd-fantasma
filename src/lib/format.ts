@@ -1,11 +1,13 @@
 import type { Item } from "./types";
 
-export function formatBytes(n: number, locale = "pt-BR"): string {
+export function formatBytes(n: number, locale = "pt-BR", fixed2 = false): string {
   if (!isFinite(n) || n <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB", "PB"];
   const i = Math.min(units.length - 1, Math.floor(Math.log10(n) / 3));
   const v = n / Math.pow(1000, i);
-  const nf = new Intl.NumberFormat(locale, { maximumFractionDigits: i === 0 ? 0 : v < 10 ? 2 : v < 100 ? 1 : 0 });
+  const nf = new Intl.NumberFormat(locale, fixed2 && i > 0
+    ? { minimumFractionDigits: 2, maximumFractionDigits: 2 }
+    : { maximumFractionDigits: i === 0 ? 0 : v < 10 ? 2 : v < 100 ? 1 : 0 });
   return `${nf.format(v)} ${units[i]}`;
 }
 

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { S, diskById, activate, goUp, gotoResult, loadMore, searchActive } from "$lib/store.svelte";
+  import { S, diskById, gotoResult, loadMore } from "$lib/store.svelte";
   import { t, locale, type Key } from "$lib/i18n";
   import { formatBytes, formatDate, formatNumber, parentPath } from "$lib/format";
   import type { Item } from "$lib/types";
@@ -9,7 +9,6 @@
   const OVERSCAN = 8;
   interface Row { item: Item; depth: number }
 
-  const searching = $derived(searchActive());
 
   function cmp(a: Item, b: Item): number {
     const { key, dir } = S.sort;
@@ -24,22 +23,12 @@
     }
     return r * dir || a.name.localeCompare(b.name);
   }
-  const sorted = (l: Item[]): Item[] => {
-    if (searching) return [...l].sort(cmp);
-    return [...l.filter((i) => i.kind === "folder").sort(cmp), ...l.filter((i) => i.kind !== "folder").sort(cmp)];
-  };
-
-  const flat = $derived.by<Row[]>(() => {
-    if (searching) return sorted(S.results).map((item) => ({ item, depth: 0 }));
-    return sorted(S.rows).map((item) => ({ item, depth: 0 }));
-  });
+  const flat = $derived.by<Row[]>(() => [...S.results].sort(cmp).map((item) => ({ item, depth: 0 })));
 
   type Col = { key: string; label: Key; width: string; align?: "right" };
   const cols = $derived.by<Col[]>(() => {
-    const c: Col[] = [{ key: "name", label: "col.name", width: searching ? "minmax(200px,1.2fr)" : "minmax(220px,1fr)" }];
-    if (searching) {
-      c.push({ key: "disk", label: "col.disk", width: "120px" }, { key: "path", label: "col.path", width: "minmax(160px,1.5fr)" });
-    }
+    const c: Col[] = [{ key: "name", label: "col.name", width: "minmax(200px,1.2fr)" }];
+    c.push({ key: "disk", label: "col.disk", width: "120px" }, { key: "path", label: "col.path", width: "minmax(160px,1.5fr)" });
     c.push(
       { key: "size", label: "col.size", width: "88px", align: "right" },
       { key: "kind", label: "col.kind", width: "92px" },
@@ -59,12 +48,7 @@
   const visible = $derived(flat.slice(start, end));
 
   $effect(() => {
-    if (searching && flat.length && end >= flat.length - 20 && S.results.length < S.total) loadMore();
-  });
-  // volta ao topo quando a lista muda de pasta ou de busca
-  $effect(() => {
-    void S.folderId; void S.selDiskId;
-    if (!searching && scroller) scroller.scrollTop = 0;
+    if (flat.length && end >= flat.length - 20 && S.results.length < S.total) loadMore();
   });
   let lastQ = "";
   $effect(() => {
@@ -81,10 +65,7 @@
 
   const selIndex = $derived(S.selItem ? flat.findIndex((r) => r.item.id === S.selItem!.id) : -1);
 
-  function select(item: Item) {
-    if (searching) gotoResult(item);
-    else S.selItem = item;
-  }
+  const select = (item: Item) => { void gotoResult(item); };
   function move(delta: number) {
     if (!flat.length) return;
     const i = selIndex < 0 ? (delta > 0 ? 0 : flat.length - 1) : Math.max(0, Math.min(flat.length - 1, selIndex + delta));
@@ -100,27 +81,22 @@
       case "PageUp": e.preventDefault(); move(-Math.floor(viewH / ROW)); break;
       case "Home": e.preventDefault(); move(-1e9); break;
       case "End": e.preventDefault(); move(1e9); break;
-      case "Enter": if (S.selItem) { e.preventDefault(); activate(S.selItem); } break;
-      case "Backspace": if (!searching) { e.preventDefault(); goUp(); } break;
+      case "Enter": if (S.selItem) { e.preventDefault(); gotoResult(S.selItem, true); } break;
     }
   }
   function sortBy(key: string) {
     S.sort = S.sort.key === key ? { key, dir: (S.sort.dir * -1) as 1 | -1 } : { key, dir: 1 };
   }
   const kindLabel = (i: Item) => (i.kind === "other" || i.kind === "archive" || i.kind === "document") && i.ext ? i.ext.toUpperCase() : $t(`kind.${i.kind}` as Key);
-  const loading = $derived(searching ? S.searching && !S.results.length : S.rowsLoading);
+  const loading = $derived(S.searching && !S.results.length);
 </script>
 
 <div class="wrap">
-  {#if searching}
-    <div class="strip muted">
-      {#if S.searching && !S.results.length}{$t("loading")}
-      {:else if S.results.length < S.total}{$t("results.partial", { shown: formatNumber(S.results.length, $locale), n: formatNumber(S.total, $locale) })}
-      {:else}{$t("results", { n: formatNumber(S.total, $locale) })}{/if}
-    </div>
-  {:else if S.trail.length}
-    <div class="strip muted ellipsis" title={S.trail.map((i) => i.name).join(" / ")}>{S.trail.map((i) => i.name).join("  ›  ")}</div>
-  {/if}
+  <div class="strip muted">
+    {#if S.searching && !S.results.length}{$t("loading")}
+    {:else if S.results.length < S.total}{$t("results.partial", { shown: formatNumber(S.results.length, $locale), n: formatNumber(S.total, $locale) })}
+    {:else}{$t("results", { n: formatNumber(S.total, $locale) })}{/if}
+  </div>
 
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <div class="scroller" bind:this={scroller} bind:clientHeight={viewH} onscroll={(e) => (scrollTop = e.currentTarget.scrollTop)}
@@ -141,15 +117,13 @@
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <div class="row" class:sel={S.selItem?.id === it.id} class:alt={i % 2 === 1}
                style="top:{i * ROW}px;grid-template-columns:{template}" role="row" tabindex="-1" aria-selected={S.selItem?.id === it.id}
-               onclick={() => { select(it); scroller?.focus(); }} ondblclick={() => activate(it)}>
+               onclick={() => { select(it); scroller?.focus(); }} ondblclick={() => gotoResult(it, true)}>
             <div class="cell name" style="padding-left:{8 + r.depth * 16}px">
               <KindIcon kind={it.kind} />
               <span class="ellipsis" title={it.name}>{it.name}</span>
             </div>
-            {#if searching}
-              <div class="cell ellipsis muted" title={diskById(it.diskId)?.name}>{diskById(it.diskId)?.name ?? "—"}</div>
-              <div class="cell ellipsis muted" title={it.path}>{parentPath(it) || "/"}</div>
-            {/if}
+            <div class="cell ellipsis muted" title={diskById(it.diskId)?.name}>{diskById(it.diskId)?.name ?? "—"}</div>
+            <div class="cell ellipsis muted" title={it.path}>{parentPath(it) || "/"}</div>
             <div class="cell r num">{formatBytes(it.sizeBytes, $locale)}</div>
             <div class="cell ellipsis muted">{kindLabel(it)}</div>
             <div class="cell ellipsis muted num">{formatDate(it.modifiedAt, $locale)}</div>
@@ -159,7 +133,7 @@
       {#if loading}
         <p class="note muted">{$t("loading")}</p>
       {:else if !flat.length}
-        <p class="note muted">{searching ? $t("noResults") : S.selDiskId == null ? $t("pickDisk") : $t("emptyFolder")}</p>
+        <p class="note muted">{$t("noResults")}</p>
       {/if}
     </div>
   </div>
