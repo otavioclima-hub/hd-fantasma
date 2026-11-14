@@ -195,13 +195,36 @@ async fn set_settings(state: State<'_, AppState>, settings: Settings) -> CmdResu
     blocking(move || s.set_settings(&settings).map_err(err)).await
 }
 
+/// ADR 0015: a janela só pode mostrar a própria interface; qualquer endereço externo é bloqueado.
+fn allow_navigation(url: &tauri::Url) -> bool {
+    match url.scheme() {
+        "tauri" | "ipc" | "asset" => true,
+        "http" | "https" => {
+            let host = url.host_str().unwrap_or("");
+            if host == "tauri.localhost" || host == "ipc.localhost" || host == "asset.localhost" {
+                return true;
+            }
+            cfg!(debug_assertions) && host == "localhost" && url.port() == Some(1420)
+        }
+        _ => false,
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let catalog_path = hdf_core::db::default_catalog_path().expect("pasta Documentos não encontrada");
     // Cria a pasta e o esquema já na abertura do app.
     Catalog::open(&catalog_path).expect("não foi possível abrir o catálogo");
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            use tauri::WebviewWindowBuilder;
+            // Janela principal criada aqui para travar a navegação (ADR 0015).
+            let cfg = app.config().app.windows[0].clone();
+            WebviewWindowBuilder::from_config(app.handle(), &cfg)?
+                .on_navigation(allow_navigation)
+                .build()?;
+            Ok(())
+        })
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             catalog_path,

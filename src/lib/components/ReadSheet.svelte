@@ -10,7 +10,6 @@
   let loading = $state(true);
   let error = $state("");
   let chosen = $state<string | null>(null);
-  let mode = $state<"quick" | "full">("quick");
   let hidden = $state(S.settings.includeHidden);
 
   async function load() {
@@ -23,7 +22,6 @@
   $effect(() => { load(); });
 
   const vol = $derived(volumes.find((v) => v.mountPath === chosen) ?? null);
-  $effect(() => { if (vol && vol.catalogedDiskId == null) mode = "full"; else if (vol) mode = "quick"; });
 </script>
 
 <svelte:window onkeydown={(e) => e.key === "Escape" && (S.sheetOpen = false)} />
@@ -51,20 +49,11 @@
         {/each}
       </div>
 
-      <div class="sec">{$t("sheet.mode")}</div>
-      <label class="opt" class:dis={vol?.catalogedDiskId == null}>
-        <input type="radio" name="mode" value="quick" bind:group={mode} disabled={vol?.catalogedDiskId == null} />
-        <div><strong>{$t("menu.quick")}</strong><div class="muted small">{$t("sheet.quickHelp")}</div></div>
-      </label>
-      <label class="opt">
-        <input type="radio" name="mode" value="full" bind:group={mode} />
-        <div><strong>{$t("menu.full")}</strong><div class="muted small">{$t("sheet.fullHelp")}</div></div>
-      </label>
       <label class="opt chk"><input type="checkbox" bind:checked={hidden} /> {$t("sheet.hidden")}</label>
     </div>
     <footer>
       <button class="btn" onclick={() => (S.sheetOpen = false)}>{$t("cancel")}</button>
-      <button class="btn primary" disabled={!vol} onclick={() => vol && startRead(vol.mountPath, vol.name, { mode, includeHidden: hidden })}>{$t("sheet.start")}</button>
+      <button class="btn primary" disabled={!vol} onclick={() => vol && startRead(vol.mountPath, vol.name, { mode: "full", includeHidden: hidden })}>{$t("sheet.start")}</button>
     </footer>
   </div>
 </div>
@@ -76,8 +65,5 @@
   .vi { min-width: 0; flex: 1; }
   .small { font-size: 11px; }
   .tag { font-size: 10px; background: var(--bg-3); border-radius: 8px; padding: 1px 7px; color: var(--fg-2); margin-left: 4px; }
-  .sec { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--fg-2); font-weight: 600; margin: 10px 0 5px; }
-  .opt { margin-bottom: 4px; align-items: flex-start; }
-  .opt.dis { opacity: 0.5; }
   .opt.chk { border: 0; padding-left: 2px; align-items: center; }
 </style>

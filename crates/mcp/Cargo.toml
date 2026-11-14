@@ -1,0 +1,21 @@
+[package]
+name = "hd-fantasma-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "MCP do HD Fantasma: deixa o Claude consultar o catálogo (só stdio, sem internet)"
+
+[lib]
+name = "hdf_mcp"
+
+[[bin]]
+name = "hd-fantasma-mcp"
+path = "src/main.rs"
+
+[dependencies]
+hdf-core = { path = "../core" }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

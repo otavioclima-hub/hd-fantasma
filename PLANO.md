@@ -12,10 +12,10 @@ Decisões tomadas com o Otavio em 2026-11-14 (4 rodadas de perguntas). O porquê
 - Busca em todos os discos, com filtros: tipo pela extensão (vídeo/imagem/áudio/documento/compactado/outro), tamanho mín/máx, data, discos escolhidos.
 - Navegar disco ausente.
 - Duplicados (nome + tamanho, ADR 0007).
-- Atualização rápida + releitura completa (ADR 0006).
+- Um botão "Ler de novo" (ADR 0016).
 - Exportar/importar catálogo de um disco (`.hdfantasma`).
 - Idiomas: português e inglês.
-- Atualizador do Tauri pelo GitHub Releases; nada mais sai do computador (ADR 0008).
+- Sem internet de jeito nenhum, nem para atualizar (ADR 0015).
 - MCP (`hd-fantasma-mcp`): buscar com filtros, listar discos, detalhes do item, navegar pastas, duplicados, catalogar disco presente (ADR 0005).
 
 ## Ordem

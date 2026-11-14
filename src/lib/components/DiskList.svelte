@@ -11,12 +11,11 @@
   function ctx(e: MouseEvent, d: Disk) {
     e.preventDefault();
     const can = d.present && !!d.mountPath;
-    const read = (mode: "quick" | "full") => startRead(d.mountPath!, d.name, { mode, includeHidden: S.settings.includeHidden });
+    const read = () => startRead(d.mountPath!, d.name, { mode: "full", includeHidden: S.settings.includeHidden });
     menu = {
       x: e.clientX, y: e.clientY,
       items: [
-        { label: $t("menu.quick"), disabled: !can, onclick: () => read("quick") },
-        { label: $t("menu.full"), disabled: !can, onclick: () => read("full") },
+        { label: $t("menu.reread"), disabled: !can, onclick: read },
         { label: $t("menu.rename"), sep: true, onclick: () => renameDisk(d) },
         { label: $t("menu.export"), onclick: () => exportDisk(d) },
         { label: $t("menu.remove"), sep: true, danger: true, onclick: () => removeDisk(d) },

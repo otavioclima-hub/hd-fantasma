@@ -28,13 +28,9 @@ _Avoid_: entrada, registro, nó
 O ato de percorrer um disco presente e gravar seus itens no catálogo.
 _Avoid_: scan, varredura, indexação
 
-**Atualização rápida**:
-Leitura de um disco já catalogado que atualiza o catálogo com o que mudou.
-_Avoid_: sincronizar
-
-**Releitura completa**:
-Leitura que descarta tudo o que havia daquele disco e refaz do zero.
-_Avoid_: reset, recatalogar
+**Ler de novo**:
+Leitura de um disco já catalogado, que substitui a lista anterior dele.
+_Avoid_: atualização rápida, releitura completa, sincronizar
 
 **Duplicado**:
 Itens em qualquer disco com o mesmo nome e o mesmo tamanho.

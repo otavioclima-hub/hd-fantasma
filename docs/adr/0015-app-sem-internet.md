@@ -1,0 +1,3 @@
+# O app e o MCP nunca acessam a internet
+
+Decisão do Otavio em 2026-11-14: o HD Fantasma não pode ter acesso à internet de jeito nenhum. Por isso, sai a checagem de versão nova com atualização em um clique (decisão Q27 e trecho da ADR 0008): quem quiser a versão nova baixa de novo no GitHub. A trava é feita em camadas: CSP da janela proibindo qualquer conexão externa, sem plugins com rede (sai o `tauri-plugin-opener`; o "Mostrar no Finder" é código nosso), nenhuma dependência de rede no binário de macOS (o `reqwest` só aparece no Tauri para celular), e o MCP conversa com o Claude só por stdio, dentro do próprio Mac. A prova é medir as conexões do app durante uma leitura: precisam ser zero.
