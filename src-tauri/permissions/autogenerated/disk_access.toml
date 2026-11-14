@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-disk-access"
+description = "Enables the disk_access command without any pre-configured scope."
+commands.allow = ["disk_access"]
+
+[[permission]]
+identifier = "deny-disk-access"
+description = "Denies the disk_access command without any pre-configured scope."
+commands.deny = ["disk_access"]

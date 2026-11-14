@@ -23,6 +23,8 @@
     "allow-export-disk",
     "allow-import-disk",
     "allow-reveal-item",
+    "allow-disk-access",
+    "allow-open-disk-access-settings",
     "allow-get-settings",
     "allow-set-settings",
     "allow-claude-status",

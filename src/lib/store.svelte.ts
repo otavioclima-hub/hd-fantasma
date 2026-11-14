@@ -330,7 +330,7 @@ export async function loadMore() {
 export async function startRead(mountPath: string, name: string, options: ReadOptions) {
   // Internal Mac disk without Full Disk Access: macOS would ask folder by folder. Offer the
   // one-time switch first.
-  if ((await api.diskAccess(mountPath).catch(() => "ok")) === "needed") {
+  if ((await api.diskAccess(mountPath).catch(() => (mountPath === "/" ? "needed" : "ok"))) === "needed") {
     S.sheetOpen = false;
     const c = await askChoice(tr("access.title"), tr("access.text"), tr("access.open"), tr("access.anyway"));
     if (c === null) return;

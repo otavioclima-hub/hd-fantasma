@@ -14,6 +14,8 @@ const COMMANDS: &[&str] = &[
     "export_disk",
     "import_disk",
     "reveal_item",
+    "disk_access",
+    "open_disk_access_settings",
     "get_settings",
     "set_settings",
     "claude_status",

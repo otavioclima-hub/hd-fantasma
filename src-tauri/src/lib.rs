@@ -271,6 +271,27 @@ fn allow_navigation(url: &tauri::Url) -> bool {
 }
 
 #[cfg(test)]
+mod command_list_tests {
+    /// A command registered in `generate_handler!` but missing from build.rs or the capability
+    /// cannot be called by the window, and the call fails silently. Keep the three lists equal.
+    #[test]
+    fn every_command_is_allowed_for_the_window() {
+        let src = include_str!("lib.rs");
+        let start = src.rfind("generate_handler![").unwrap() + "generate_handler![".len();
+        let end = start + src[start..].find(']').unwrap();
+        let build = include_str!("../build.rs");
+        let caps = include_str!("../capabilities/default.json");
+        let names: Vec<&str> = src[start..end].split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+        assert!(names.len() > 10);
+        for n in names {
+            assert!(build.contains(&format!("\"{n}\"")), "{n} missing from build.rs");
+            let allow = format!("\"allow-{}\"", n.replace('_', "-"));
+            assert!(caps.contains(&allow), "{allow} missing from capabilities/default.json");
+        }
+    }
+}
+
+#[cfg(test)]
 mod nav_tests {
     use super::allow_navigation;
 
