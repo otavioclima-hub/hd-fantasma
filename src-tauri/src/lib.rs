@@ -1,6 +1,8 @@
 //! App Tauri do HD Fantasma: comandos finos que chamam o motor (`hdf_core`).
 //! Contrato: docs/CONTRATO.md. Erros voltam como texto em pt-BR.
 
+mod claude;
+
 use hdf_core::*;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -195,6 +197,22 @@ async fn set_settings(state: State<'_, AppState>, settings: Settings) -> CmdResu
     blocking(move || s.set_settings(&settings).map_err(err)).await
 }
 
+#[tauri::command]
+async fn claude_status() -> CmdResult<claude::ClaudeStatus> {
+    blocking(|| Ok(claude::status(&claude::Ctx::from_system()?))).await
+}
+
+/// `target` opcional: "desktop" ou "code"; sem ele, conecta em todos os que existirem.
+#[tauri::command]
+async fn claude_connect(target: Option<String>) -> CmdResult<claude::ClaudeStatus> {
+    blocking(move || claude::connect(&claude::Ctx::from_system()?, target.as_deref())).await
+}
+
+#[tauri::command]
+async fn claude_disconnect(target: Option<String>) -> CmdResult<claude::ClaudeStatus> {
+    blocking(move || claude::disconnect(&claude::Ctx::from_system()?, target.as_deref())).await
+}
+
 /// ADR 0015: a janela só pode mostrar a própria interface; qualquer endereço externo é bloqueado.
 fn allow_navigation(url: &tauri::Url) -> bool {
     match url.scheme() {
@@ -247,6 +265,9 @@ pub fn run() {
             reveal_item,
             get_settings,
             set_settings,
+            claude_status,
+            claude_connect,
+            claude_disconnect,
         ])
         .run(tauri::generate_context!())
         .expect("erro ao iniciar o HD Fantasma");

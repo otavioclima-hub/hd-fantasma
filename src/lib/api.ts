@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { mock, onProgress as mockOnProgress } from "./mock";
 import type {
-  Disk, DuplicateGroup, Item, MountedVolume, ReadOptions, ReadProgress, SearchQuery, SearchResult, Settings,
+  ClaudeStatus, ClaudeTarget, Disk, DuplicateGroup, Item, MountedVolume, ReadOptions, ReadProgress, SearchQuery, SearchResult, Settings,
 } from "./types";
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -38,6 +38,12 @@ export const importDisk = (srcPath: string) => call<Disk>("import_disk", { srcPa
 export const revealItem = (id: number) => call<void>("reveal_item", { id }, () => m.reveal_item({ id }));
 export const getSettings = () => call<Settings>("get_settings", undefined, () => m.get_settings());
 export const setSettings = (settings: Settings) => call<Settings>("set_settings", { settings }, () => m.set_settings({ settings }));
+
+export const claudeStatus = () => call<ClaudeStatus>("claude_status", undefined, () => m.claude_status());
+export const claudeConnect = (target?: ClaudeTarget) =>
+  call<ClaudeStatus>("claude_connect", { target: target ?? null }, () => m.claude_connect({ target }));
+export const claudeDisconnect = (target?: ClaudeTarget) =>
+  call<ClaudeStatus>("claude_disconnect", { target: target ?? null }, () => m.claude_disconnect({ target }));
 
 /** Escuta o evento "read-progress". Devolve a função para parar de escutar. */
 export async function onReadProgress(cb: (p: ReadProgress) => void): Promise<() => void> {

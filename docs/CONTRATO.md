@@ -96,3 +96,19 @@ interface ReadProgress {
 Erros: string legível em pt-BR (ex.: `"O disco não está plugado."`).
 
 O app nunca abre arquivos (ADR 0013): sem dados de vídeo, sem conteúdo de compactados.
+
+## Ligação com o Claude (ADR 0017)
+
+```ts
+interface ClaudeStatus {
+  mcpPath: string;                 // binário hd-fantasma-mcp ao lado do app
+  desktop: { installed: boolean; connected: boolean; configPath: string };
+  code: { cliFound: boolean; connected: boolean; command: string }; // command = linha pronta para copiar
+}
+```
+
+| Comando | Argumentos | Retorno |
+|---|---|---|
+| `claude_status` | — | `ClaudeStatus` |
+| `claude_connect` | `{ target?: "desktop" \| "code" }` | `ClaudeStatus` (sem target: conecta nos que existirem) |
+| `claude_disconnect` | `{ target?: "desktop" \| "code" }` | `ClaudeStatus` |

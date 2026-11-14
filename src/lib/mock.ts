@@ -1,6 +1,6 @@
 // Dados de exemplo para desenvolver a tela num navegador comum (sem Tauri).
 import type {
-  Disk, DuplicateGroup, Item, Kind, MountedVolume, ReadOptions, ReadProgress, SearchQuery, SearchResult, Settings,
+  ClaudeStatus, Disk, DuplicateGroup, Item, Kind, MountedVolume, ReadOptions, ReadProgress, SearchQuery, SearchResult, Settings,
 } from "./types";
 
 const MB = 1e6, GB = 1e9, TB = 1e12;
@@ -185,6 +185,13 @@ export const onProgress = (cb: (p: ReadProgress) => void) => {
 };
 const emit = (p: ReadProgress) => progressListeners.forEach((l) => l(p));
 
+const MOCK_MCP = "/Applications/HD Fantasma.app/Contents/MacOS/hd-fantasma-mcp";
+const claude: ClaudeStatus = {
+  mcpPath: MOCK_MCP,
+  desktop: { installed: true, connected: false, configPath: "/Users/voce/Library/Application Support/Claude/claude_desktop_config.json" },
+  code: { cliFound: true, connected: false, command: `claude mcp add --scope user hd-fantasma -- "${MOCK_MCP}"` },
+};
+
 export const mock = {
   async list_disks(): Promise<Disk[]> {
     await sleep(80);
@@ -304,4 +311,17 @@ export const mock = {
   async reveal_item(_a: { id: number }) { /* nada no navegador */ },
   async get_settings(): Promise<Settings> { return { ...settings }; },
   async set_settings(a: { settings: Settings }): Promise<Settings> { settings = { ...a.settings }; return { ...settings }; },
+  async claude_status(): Promise<ClaudeStatus> { await sleep(120); return structuredClone(claude); },
+  async claude_connect(a: { target?: "desktop" | "code" }): Promise<ClaudeStatus> {
+    await sleep(350);
+    if (a.target !== "code" && claude.desktop.installed) claude.desktop.connected = true;
+    if (a.target !== "desktop" && claude.code.cliFound) claude.code.connected = true;
+    return structuredClone(claude);
+  },
+  async claude_disconnect(a: { target?: "desktop" | "code" }): Promise<ClaudeStatus> {
+    await sleep(350);
+    if (a.target !== "code") claude.desktop.connected = false;
+    if (a.target !== "desktop") claude.code.connected = false;
+    return structuredClone(claude);
+  },
 };

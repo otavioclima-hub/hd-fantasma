@@ -2,6 +2,7 @@
   import { S, searchActive, openDuplicates, setViewMode, toggleInspector } from "$lib/store.svelte";
   import { t } from "$lib/i18n";
   import { isMock } from "$lib/api";
+  import ClaudeConnect from "./ClaudeConnect.svelte";
 
   const isMac = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform || navigator.userAgent);
   let { searchEl = $bindable() }: { searchEl?: HTMLInputElement } = $props();
@@ -37,6 +38,7 @@
   <button class="btn icon" title={$t("settings")} aria-label={$t("settings")} onclick={() => (S.settingsOpen = true)}>
     <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.3" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M12.6 3.4l-1.4 1.4M4.8 11.2l-1.4 1.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
   </button>
+  <ClaudeConnect />
   <button class="btn icon info" class:on={S.settings.showInspector} title={$t("inspector.toggle") + " (" + (isMac ? "⌘I" : "Ctrl+I") + ")"} aria-label={$t("inspector.toggle")}
           aria-pressed={S.settings.showInspector} onclick={toggleInspector}>
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M10 3v10" stroke="currentColor" stroke-width="1.4" /><path d="M11.5 5.6h1M11.5 7.6h1M11.5 9.6h1" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" /></svg>

@@ -85,3 +85,11 @@ export interface Settings {
   viewMode: "columns" | "list";
   showInspector: boolean;
 }
+
+// Ligação com o Claude (ADR 0017; docs/CONTRATO.md)
+export interface ClaudeStatus {
+  mcpPath: string;
+  desktop: { installed: boolean; connected: boolean; configPath: string };
+  code: { cliFound: boolean; connected: boolean; command: string };
+}
+export type ClaudeTarget = "desktop" | "code";

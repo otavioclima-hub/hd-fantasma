@@ -2,7 +2,7 @@
 import * as api from "./api";
 import { lang, t, type Key } from "./i18n";
 import { get } from "svelte/store";
-import type { Disk, DuplicateGroup, Item, Kind, ReadOptions, ReadProgress, SearchQuery, Settings } from "./types";
+import type { ClaudeStatus, ClaudeTarget, Disk, DuplicateGroup, Item, Kind, ReadOptions, ReadProgress, SearchQuery, Settings } from "./types";
 
 export const PAGE = 500;
 const tr = (k: Key, p?: Record<string, string | number>) => get(t)(k, p);
@@ -50,6 +50,10 @@ export const S = $state({
   readName: "",
   progress: null as ReadProgress | null,
   toast: "" as string,
+  claude: null as ClaudeStatus | null,
+  claudeBusy: false,
+  claudeError: "",
+  claudeJustDesktop: false,
   dialog: null as null | {
     kind: "confirm" | "prompt";
     title: string;
@@ -91,10 +95,35 @@ export async function init() {
     S.settings = await api.getSettings();
     lang.set(S.settings.language);
   } catch (e) { fail(e); }
+  void refreshClaude(true);
   await loadDisks();
   S.ready = true;
   await api.onReadProgress((p) => { S.progress = p; });
 }
+
+// ---------- ligação com o Claude (ADR 0017) ----------
+export async function refreshClaude(silent = false) {
+  try {
+    S.claude = await api.claudeStatus();
+    if (!silent) S.claudeError = "";
+  } catch (e) { if (!silent) S.claudeError = e instanceof Error ? e.message : String(e); }
+}
+
+async function claudeAct(fn: () => Promise<ClaudeStatus>, desktopTouched: boolean) {
+  if (S.claudeBusy) return;
+  S.claudeBusy = true;
+  S.claudeError = "";
+  try {
+    S.claude = await fn();
+    S.claudeJustDesktop = desktopTouched && !!S.claude.desktop.connected;
+  } catch (e) {
+    S.claudeError = e instanceof Error ? e.message : String(e);
+    await refreshClaude(true);
+  } finally { S.claudeBusy = false; }
+}
+
+export const claudeConnect = (target?: ClaudeTarget) => claudeAct(() => api.claudeConnect(target), target !== "code");
+export const claudeDisconnect = (target?: ClaudeTarget) => claudeAct(() => api.claudeDisconnect(target), false);
 
 export async function loadDisks() {
   try {
