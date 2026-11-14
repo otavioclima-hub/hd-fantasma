@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-rename-disk"
+description = "Enables the rename_disk command without any pre-configured scope."
+commands.allow = ["rename_disk"]
+
+[[permission]]
+identifier = "deny-rename-disk"
+description = "Denies the rename_disk command without any pre-configured scope."
+commands.deny = ["rename_disk"]

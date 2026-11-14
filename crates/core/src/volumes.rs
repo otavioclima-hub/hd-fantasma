@@ -21,6 +21,27 @@ pub fn list_mounted_volumes(catalog: &Catalog) -> Result<Vec<MountedVolume>> {
 }
 
 /// Identifica o volume que contém `mount_path` (usado pela Leitura).
+/// True when the volume is on a disk inside this computer (the system disk, or any other
+/// internal volume), as far as the system can tell. Unknown means "internal": safer.
+pub fn is_internal_volume(mount_path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let canon = std::fs::canonicalize(mount_path).unwrap_or_else(|_| mount_path.to_path_buf());
+        if canon == Path::new("/") || canon.starts_with("/System/Volumes") {
+            return true;
+        }
+        match mac::diskutil(&canon) {
+            Some(i) => i.internal,
+            None => !mac::statfs(&canon).map(|s| mac::is_network_fs(&s.fstype)).unwrap_or(false),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = mount_path;
+        true
+    }
+}
+
 pub fn identify(mount_path: &Path) -> Result<MountedVolume> {
     if !mount_path.is_dir() {
         return Err(Error::msg("O disco não está plugado."));
@@ -65,6 +86,8 @@ mod mac {
         pub uuid: Option<String>,
         pub fs: Option<String>,
         pub name: Option<String>,
+        /// The system says the volume lives on a disk inside the computer.
+        pub internal: bool,
     }
 
     pub fn diskutil(path: &Path) -> Option<DiskutilInfo> {
@@ -83,6 +106,9 @@ mod mac {
             uuid: s("VolumeUUID"),
             fs: s("FilesystemType"),
             name: s("VolumeName"),
+            internal: ["Internal", "OSInternalMedia"]
+                .iter()
+                .any(|k| d.get(*k).and_then(|x| x.as_boolean()).unwrap_or(false)),
         })
     }
 

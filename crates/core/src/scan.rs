@@ -673,7 +673,10 @@ fn read_disk_inner(
         tx.execute("DELETE FROM items WHERE disk_id=?1", [disk_id])?;
     }
 
-    let first_new_id: i64 = tx.query_row("SELECT COALESCE(MAX(id),0)+1 FROM items", [], |r| r.get(0))?;
+    let max_id: i64 = tx.query_row("SELECT COALESCE(MAX(id),0) FROM items", [], |r| r.get(0))?;
+    let first_new_id = max_id
+        .checked_add(1)
+        .ok_or_else(|| crate::error::Error::msg("O catálogo chegou ao limite de itens."))?;
     let next_id = AtomicI64::new(first_new_id);
 
     let bytes_seen = AtomicU64::new(0);

@@ -70,6 +70,12 @@ pub fn default_catalog_path() -> Result<PathBuf> {
     Ok(docs.join("HD Fantasma").join("catalogo.sqlite"))
 }
 
+/// The catalog was written by a newer HD Fantasma: never touch it (an older app could break it).
+pub const MSG_NEWER_CATALOG: &str =
+    "Este catálogo foi criado por uma versão mais nova do HD Fantasma. Atualize o app para abri-lo.";
+/// The catalog file cannot be read as a catalog (damaged, or not a catalog at all).
+pub const MSG_DAMAGED_CATALOG: &str = "O arquivo do catálogo está danificado.";
+
 /// Extension of an exported disk file.
 pub const EXPORT_EXT: &str = "hdfantasma";
 
@@ -127,7 +133,10 @@ impl Catalog {
     /// Cria/atualiza o esquema. Só pega a trava de escrita se houver algo a fazer.
     fn migrate(&self) -> Result<()> {
         let v = self.current_version()?;
-        if v >= SCHEMA_VERSION {
+        if v > SCHEMA_VERSION {
+            return Err(Error::msg(MSG_NEWER_CATALOG));
+        }
+        if v == SCHEMA_VERSION {
             return Ok(());
         }
         let tx = self.conn.unchecked_transaction()?;
@@ -153,7 +162,7 @@ impl Catalog {
             // v3: total de itens dentro de cada pasta (`descendant_count`); calcula para o que já existe.
             // (Catálogo novo já nasce com a coluna no SCHEMA.)
             tx.execute("ALTER TABLE items ADD COLUMN descendant_count INTEGER NOT NULL DEFAULT 0", [])?;
-            recompute_descendants(&tx, None)?;
+            recompute_descendants(&tx, None).map_err(|_| Error::msg(MSG_DAMAGED_CATALOG))?;
         }
         tx.execute("DELETE FROM schema_version", [])?;
         tx.execute("INSERT INTO schema_version(version) VALUES (?1)", [SCHEMA_VERSION])?;
@@ -432,12 +441,19 @@ impl Catalog {
                     ),
                     params![offset, disk_id],
                 )?;
+                // The search text is rebuilt from the names, never taken from the file.
+                let _ = keep_i;
+                self.conn.create_scalar_function(
+                    "hdf_norm",
+                    1,
+                    rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                        | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+                    |ctx| Ok(normalize(&ctx.get::<String>(0)?)),
+                )?;
                 self.conn.execute(
-                    &format!(
-                        "INSERT INTO main.items_fts(rowid,name_norm)
-                         SELECT f.rowid+?1, f.name_norm FROM imp.items_fts f JOIN imp.items i ON i.id=f.rowid {keep_i}"
-                    ),
-                    [offset],
+                    "INSERT INTO main.items_fts(rowid,name_norm)
+                     SELECT id, hdf_norm(name) FROM main.items WHERE disk_id=?1",
+                    [disk_id],
                 )?;
                 // Exportações antigas não trazem `descendant_count`: recalcula para este disco.
                 recompute_descendants(&self.conn, Some(disk_id))?;
@@ -488,16 +504,19 @@ fn validate_import(conn: &Connection) -> Result<()> {
             Err(_) => Ok(true),
         }
     };
-    let disks = "SELECT COUNT(*) FROM imp.disks WHERE typeof(uuid)!='text' OR uuid='' OR typeof(name)!='text'
+    let disks = "SELECT COUNT(*) FROM imp.disks WHERE typeof(uuid)!='text' OR uuid='' OR length(uuid)>256
+         OR typeof(name)!='text' OR length(name)>1024
          OR typeof(filesystem)!='text' OR typeof(last_read_at)!='text'
          OR typeof(capacity_bytes)!='integer' OR capacity_bytes<0
          OR typeof(free_bytes)!='integer' OR free_bytes<0
          OR typeof(item_count)!='integer' OR item_count<0
          OR typeof(total_bytes)!='integer' OR total_bytes<0";
-    let items = "SELECT COUNT(*) FROM imp.items WHERE typeof(id)!='integer' OR id<1
+    // Ids stay far from the integer limit (id + offset must never overflow); names and paths
+    // keep the sizes a real disk can have.
+    let items = "SELECT COUNT(*) FROM imp.items WHERE typeof(id)!='integer' OR id<1 OR id>1000000000000
          OR typeof(parent_id) NOT IN ('integer','null') OR parent_id=id
-         OR typeof(name)!='text' OR name='' OR instr(name,'/')>0 OR instr(name,char(0))>0
-         OR typeof(path)!='text' OR path='' OR instr(path,char(0))>0
+         OR typeof(name)!='text' OR name='' OR instr(name,'/')>0 OR instr(name,char(0))>0 OR length(name)>1024
+         OR typeof(path)!='text' OR path='' OR instr(path,char(0))>0 OR length(path)>32768
          OR path LIKE '/%' OR path='..' OR path LIKE '../%' OR path LIKE '%/../%' OR path LIKE '%/..'
          OR typeof(kind)!='text'
          OR typeof(ext) NOT IN ('text','null')
@@ -505,6 +524,15 @@ fn validate_import(conn: &Connection) -> Result<()> {
          OR typeof(child_count)!='integer' OR child_count<0
          OR typeof(created_at) NOT IN ('text','null')
          OR typeof(modified_at) NOT IN ('text','null')";
+    // Only plain tables are read. A view (or trigger) in someone else's file could return
+    // different rows on each read, so what was validated would not be what gets copied.
+    let schema = "SELECT (SELECT COUNT(*) FROM imp.sqlite_master WHERE type NOT IN ('table','index'))
+         + (SELECT COUNT(*) FROM (SELECT 'disks' n UNION ALL SELECT 'items' UNION ALL SELECT 'schema_version'
+                                  UNION ALL SELECT 'items_fts') w
+            WHERE NOT EXISTS (SELECT 1 FROM imp.sqlite_master m WHERE m.name=w.n AND m.type='table'))";
+    if bad(schema)? {
+        return Err(Error::msg(INVALID_EXPORT));
+    }
     let orphans = "SELECT COUNT(*) FROM imp.items i WHERE i.parent_id IS NOT NULL
          AND NOT EXISTS (SELECT 1 FROM imp.items p WHERE p.id=i.parent_id)";
     if bad(disks)? || bad(items)? || bad(orphans)? {
@@ -534,20 +562,35 @@ pub fn recompute_descendants(conn: &Connection, disk_id: Option<i64>) -> Result<
             }
         }
     }
+    // Linear, one pass: every item is visited once, from the top folders down; each folder then
+    // adds up its children on the way back. An item never reached from the top sits in a loop
+    // (a folder that is its own ancestor: damaged or hostile file) and is refused.
+    let mut kids: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
+    let mut roots: Vec<i64> = Vec::new();
+    for (&id, p) in parent.iter() {
+        match p {
+            Some(pid) if parent.contains_key(pid) => kids.entry(*pid).or_default().push(id),
+            _ => roots.push(id),
+        }
+    }
+    let mut order: Vec<i64> = Vec::with_capacity(parent.len());
+    let mut stack = roots;
+    while let Some(id) = stack.pop() {
+        order.push(id);
+        if let Some(k) = kids.get(&id) {
+            stack.extend_from_slice(k);
+        }
+    }
+    if order.len() != parent.len() {
+        return Err(Error::msg(INVALID_EXPORT));
+    }
     let mut count: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
-    // A healthy tree is never deeper than its number of items. More steps than that means a
-    // folder is its own ancestor (damaged or hostile file): stop instead of looping forever.
-    let max_steps = parent.len();
-    for (_, p) in parent.iter() {
-        let mut cur = *p;
-        let mut steps = 0usize;
-        while let Some(pid) = cur {
-            steps += 1;
-            if steps > max_steps {
-                return Err(Error::msg(INVALID_EXPORT));
+    for &id in order.iter().rev() {
+        let below = count.get(&id).copied().unwrap_or(0);
+        if let Some(Some(pid)) = parent.get(&id) {
+            if parent.contains_key(pid) {
+                *count.entry(*pid).or_default() += 1 + below;
             }
-            *count.entry(pid).or_default() += 1;
-            cur = parent.get(&pid).copied().flatten();
         }
     }
     let mut upd = conn.prepare("UPDATE items SET descendant_count=?1 WHERE id=?2")?;

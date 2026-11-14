@@ -182,7 +182,9 @@ export const isDir = (i: Item) => i.kind === "folder";
 async function ancestorsOf(item: Item): Promise<Item[]> {
   const chain: Item[] = [];
   let pid = item.parentId;
-  while (pid != null) {
+  const seen = new Set<number>([item.id]);
+  while (pid != null && !seen.has(pid)) {
+    seen.add(pid);
     let p = memo.get(pid);
     if (!p) { p = await api.getItem(pid); memo.set(p.id, p); }
     chain.unshift(p);

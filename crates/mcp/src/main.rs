@@ -1,5 +1,5 @@
 use hdf_mcp::server::Server;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 
 fn main() {
@@ -42,8 +42,29 @@ fn main() {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
+    // One message per line; a line longer than this is refused instead of filling memory.
+    const MAX_LINE: u64 = 8 * 1024 * 1024;
+    let mut input = stdin.lock();
+    loop {
+        let mut buf = Vec::new();
+        let n = match (&mut input).take(MAX_LINE + 1).read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        if n as u64 > MAX_LINE && buf.last() != Some(&b'\n') {
+            // Skip the rest of the oversized line, then answer with a parse error.
+            let mut sink = Vec::new();
+            if input.read_until(b'\n', &mut sink).is_err() {
+                break;
+            }
+            let reply = r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Mensagem grande demais."}}"#;
+            if writeln!(out, "{reply}").is_err() || out.flush().is_err() {
+                break;
+            }
+            continue;
+        }
+        let line = String::from_utf8_lossy(&buf);
+        let line = line.trim_end_matches(['\n', '\r']);
         if line.trim().is_empty() {
             continue;
         }

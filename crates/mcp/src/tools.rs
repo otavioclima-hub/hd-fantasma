@@ -201,7 +201,7 @@ fn disk_list_hint(disks: &[Disk]) -> String {
     if disks.is_empty() {
         return "O catálogo não tem nenhum disco ainda.".into();
     }
-    let names: Vec<String> = disks.iter().take(20).map(|d| format!("\"{}\" (id {})", d.name, d.id)).collect();
+    let names: Vec<String> = disks.iter().take(20).map(|d| format!("\"{}\" (id {})", clean(&d.name), d.id)).collect();
     format!("Discos do catálogo: {}.", names.join(", "))
 }
 
@@ -239,7 +239,7 @@ fn resolve_disk(v: &Value, disks: &[Disk]) -> Result<i64, String> {
             if part.len() > 1 {
                 return Err(format!("\"{s}\" combina com mais de um disco. {}", disk_list_hint(disks)));
             }
-            Err(format!("Não achei o disco \"{s}\". {}", disk_list_hint(disks)))
+            Err(format!("Não achei o disco \"{}\". {}", clean(s), disk_list_hint(disks)))
         }
         _ => Err("Disco: informe o nome (texto) ou o id (número).".into()),
     }
@@ -277,12 +277,16 @@ fn find_by_path(cat: &Catalog, disk_id: i64, path: &str) -> Result<Option<Item>,
     let mut current: Option<Item> = None;
     let mut walked = String::new();
     for comp in path_components(path)? {
-        let children = cat.list_children(disk_id, parent).map_err(|e| e.to_string())?;
-        let found = children
-            .iter()
-            .find(|c| c.name == comp)
-            .or_else(|| children.iter().find(|c| norm_eq(&c.name, comp)))
-            .cloned();
+        // Exact name first (indexed); only then the slower accent/case-insensitive scan.
+        let exact = cat.find_child_named(disk_id, parent, comp).map_err(|e| e.to_string())?;
+        let found = match exact.into_iter().next() {
+            Some(it) => Some(it),
+            None => cat
+                .list_children(disk_id, parent)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|c| norm_eq(&c.name, comp)),
+        };
         match found {
             Some(it) => {
                 parent = Some(it.id);
@@ -290,8 +294,8 @@ fn find_by_path(cat: &Catalog, disk_id: i64, path: &str) -> Result<Option<Item>,
                 current = Some(it);
             }
             None => {
-                let onde = if walked.is_empty() { "na raiz do disco".to_string() } else { format!("em \"{walked}\"") };
-                return Err(format!("Não achei \"{comp}\" {onde}."));
+                let onde = if walked.is_empty() { "na raiz do disco".to_string() } else { format!("em \"{}\"", clean(&walked)) };
+                return Err(format!("Não achei \"{}\" {onde}.", clean(comp)));
             }
         }
     }
@@ -324,16 +328,21 @@ fn check_unknown_args(name: &str, args: &Value) -> Result<(), String> {
 
 const INTERNAL_DISK: &str = "O disco interno do computador não pode ser lido pelo Claude. Para catalogá-lo, abra o app HD Fantasma e use \"Ler disco\".";
 
-/// The computer's own disk (where the system and the person's files live). The MCP refuses to
-/// read it: a file name on a borrowed disk could otherwise talk Claude into cataloguing it.
+/// Any disk inside the computer (the system disk or another internal volume). The MCP refuses
+/// to read them: a file name on a borrowed disk could otherwise talk Claude into cataloguing them.
 fn is_internal_disk(mount_path: &str) -> bool {
-    let p = std::fs::canonicalize(mount_path).unwrap_or_else(|_| Path::new(mount_path).to_path_buf());
-    if cfg!(windows) {
-        let sys = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
-        let s = p.to_string_lossy().trim_start_matches(r"\\?\").trim_end_matches('\\').to_uppercase();
-        return s == sys.to_uppercase();
+    hdf_core::volumes::is_internal_volume(Path::new(mount_path))
+}
+
+/// Names come from disks and files someone else may have made: in text meant for the model,
+/// drop line breaks and other control characters and keep them short.
+pub(crate) fn clean(s: &str) -> String {
+    const MAX: usize = 120;
+    let mut out: String = s.chars().map(|c| if c.is_control() { ' ' } else { c }).take(MAX).collect();
+    if s.chars().count() > MAX {
+        out.push('…');
     }
-    p == Path::new("/") || p.starts_with("/System/Volumes")
+    out
 }
 
 // ---------------------------------------------------------------- execução
@@ -362,7 +371,7 @@ impl Server {
 
     fn listar_discos(&mut self) -> R {
         let disks = self.disks()?;
-        let total_items: u64 = disks.iter().map(|d| d.item_count).sum();
+        let total_items: u64 = disks.iter().fold(0u64, |a, d| a.saturating_add(d.item_count));
         Ok(json!({
             "totalDiscos": disks.len(),
             "totalItens": total_items,
@@ -463,12 +472,12 @@ impl Server {
                 return Err(format!("\"{}\" é um arquivo, não uma pasta. Use detalhes_item.", f.path));
             }
         }
-        let children = cat.list_children(disk_id, folder.as_ref().map(|f| f.id)).map_err(|e| e.to_string())?;
-        let total = children.len();
+        let (children, total) = cat
+            .list_children_page(disk_id, folder.as_ref().map(|f| f.id), limit as u32, offset as u32)
+            .map_err(|e| e.to_string())?;
+        let total = total as usize;
         let page: Vec<Value> = children
             .iter()
-            .skip(offset)
-            .take(limit)
             .map(|i| {
                 let mut m = serde_json::Map::new();
                 m.insert("id".into(), json!(i.id));
@@ -511,7 +520,10 @@ impl Server {
         let groups = self.catalog(false)?.find_duplicates(&ids, min).map_err(|e| e.to_string())?;
         const MAX_PLACES: usize = 20;
         let found = groups.len();
-        let wasted_total: u64 = groups.iter().map(|g| g.size_bytes * (g.items.len() as u64 - 1)).sum();
+        let wasted = |size: u64, copies: u64| size.saturating_mul(copies.saturating_sub(1));
+        let wasted_total: u64 = groups
+            .iter()
+            .fold(0u64, |acc, g| acc.saturating_add(wasted(g.size_bytes, g.items.len() as u64)));
         let list: Vec<Value> = groups
             .iter()
             .take(max_groups)
@@ -521,7 +533,7 @@ impl Server {
                 m.insert("nome".into(), json!(g.name));
                 size_fields(&mut m, "tamanhoBytes", "tamanho", g.size_bytes);
                 m.insert("copias".into(), json!(copies));
-                size_fields(&mut m, "desperdicioBytes", "desperdicio", g.size_bytes * (copies - 1));
+                size_fields(&mut m, "desperdicioBytes", "desperdicio", wasted(g.size_bytes, copies));
                 m.insert(
                     "locais".into(),
                     json!(
@@ -585,9 +597,10 @@ impl Server {
         };
         let vols = self.volumes(true)?;
         let refuse = || {
-            let names: Vec<String> = vols.iter().map(|v| format!("\"{}\" ({})", v.name, v.mount_path)).collect();
+            let names: Vec<String> = vols.iter().map(|v| format!("\"{}\" ({})", clean(&v.name), clean(&v.mount_path))).collect();
             format!(
-                "\"{target}\" não é a raiz de um disco montado. Só dá para catalogar um disco inteiro e plugado. Discos disponíveis: {}.",
+                "\"{}\" não é a raiz de um disco montado. Só dá para catalogar um disco inteiro e plugado. Discos disponíveis: {}.",
+                clean(&target),
                 if names.is_empty() { "nenhum".to_string() } else { names.join(", ") }
             )
         };
@@ -612,6 +625,20 @@ impl Server {
         if is_internal_disk(&vol.mount_path) {
             return Err(INTERNAL_DISK.into());
         }
+        // Same identity as a disk already in the catalog but another name: it may be a copy (or a
+        // disk made to look like it). Replacing that disk's list is left to the person, in the app.
+        if let Some(id) = vol.cataloged_disk_id {
+            let old = self.catalog(false)?.list_disks(&[]).map_err(|e| e.to_string())?;
+            if let Some(d) = old.iter().find(|d| d.id == id) {
+                if !norm_eq(&d.name, &vol.name) {
+                    return Err(format!(
+                        "O disco plugado \"{}\" tem a mesma identidade do disco \"{}\" do catálogo, mas outro nome. Para substituir a lista dele, use o app HD Fantasma.",
+                        clean(&vol.name),
+                        clean(&d.name)
+                    ));
+                }
+            }
+        }
         let t0 = Instant::now();
         let cancel = AtomicBool::new(false);
         let opts = ReadOptions { mode: ReadMode::Full, include_hidden: hidden };
@@ -627,5 +654,17 @@ impl Server {
             "mensagem": format!("Disco \"{}\" catalogado: {} itens em {:.1} s.", d.name, d.item_count, t0.elapsed().as_secs_f64()),
             "disco": disk_json(&d),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn clean_strips_control_chars_and_caps_length() {
+        assert_eq!(super::clean("a\nb\tc"), "a b c");
+        let long = "x".repeat(500);
+        let c = super::clean(&long);
+        assert_eq!(c.chars().count(), 121);
+        assert!(c.ends_with('…'));
     }
 }

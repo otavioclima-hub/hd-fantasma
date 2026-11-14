@@ -20,7 +20,7 @@ HOST="$(rustc -vV | sed -n 's/^host: //p')"
 
 build_for() { # $1 = triple
   echo ">> compilando $BIN para $1"
-  cargo build --release -p hd-fantasma-mcp --target "$1"
+  cargo build --locked --release -p hd-fantasma-mcp --target "$1"
 }
 
 if [[ "${1:-}" == "--universal" ]]; then

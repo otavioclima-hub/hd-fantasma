@@ -112,29 +112,40 @@ fn write_config(path: &Path, v: &Value) -> Result<(), String> {
     if path.exists() {
         let mut bak = path.as_os_str().to_owned();
         bak.push(".bak-hdfantasma");
-        std::fs::copy(path, PathBuf::from(bak)).map_err(|_| MSG_WRITE.to_string())?;
+        let old = std::fs::read(path).map_err(|_| MSG_WRITE.to_string())?;
+        write_new_then_rename(dir, path, &old, &PathBuf::from(bak)).map_err(|_| MSG_WRITE.to_string())?;
     }
-    let tmp = dir.join(format!(".claude_desktop_config.json.hdf-tmp-{}", std::process::id()));
+    write_new_then_rename(dir, path, text.as_bytes(), path).map_err(|_| MSG_WRITE.to_string())
+}
+
+/// Writes `bytes` to a brand-new file with an unpredictable name in `dir` (never following a
+/// link someone left there), with the permissions of `like`, then renames it over `dest`.
+fn write_new_then_rename(dir: &Path, like: &Path, bytes: &[u8], dest: &Path) -> std::io::Result<()> {
+    use std::io::Write;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = dir.join(format!(".claude_desktop_config.json.hdf-tmp-{}-{nanos}", std::process::id()));
     let res = (|| -> std::io::Result<()> {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)?;
+        // create_new: fails if anything (file or link) already has this name.
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
         // This file can hold keys of other MCP servers: keep whatever protection it had, and
         // make a brand-new one readable only by its owner.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(path).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
+            let mode = std::fs::metadata(like).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
             f.set_permissions(std::fs::Permissions::from_mode(mode))?;
         }
-        f.write_all(text.as_bytes())?;
+        f.write_all(bytes)?;
         f.sync_all()?;
-        std::fs::rename(&tmp, path)
+        std::fs::rename(&tmp, dest)
     })();
     if res.is_err() {
         let _ = std::fs::remove_file(&tmp);
-        return Err(MSG_WRITE.into());
     }
-    Ok(())
+    res
 }
 
 fn desktop_command(v: &Value) -> Option<&str> {
@@ -199,7 +210,23 @@ pub fn find_claude(ctx: &Ctx) -> Option<PathBuf> {
             }
         }
     }
-    cands.into_iter().find(|p| p.is_file())
+    cands.into_iter().find(|p| p.is_file() && trusted_program(p, &ctx.home))
+}
+
+/// Only run a `claude` that belongs to this person (or to the system) and that nobody else
+/// can change. Otherwise another account on the Mac could swap it.
+#[cfg(unix)]
+fn trusted_program(p: &Path, home: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(target) = std::fs::canonicalize(p) else { return false };
+    let Ok(m) = std::fs::metadata(&target) else { return false };
+    let me = std::fs::metadata(home).map(|h| h.uid()).unwrap_or(u32::MAX);
+    (m.uid() == me || m.uid() == 0) && m.mode() & 0o022 == 0
+}
+
+#[cfg(not(unix))]
+fn trusted_program(_p: &Path, _home: &Path) -> bool {
+    true
 }
 
 struct Out {
@@ -233,12 +260,16 @@ fn run_claude(claude: &Path, home: &Path, args: &[&str], timeout: Duration) -> R
         cmd.creation_flags(0x0800_0000); // sem janela de console
     }
     let mut child = cmd.spawn().map_err(|_| "Não consegui executar o Claude Code.".to_string())?;
+    // Output is collected on side threads that report back through a channel, so a program
+    // that leaves something running with our pipes open can never stretch the time limit.
     let drain = |mut s: Box<dyn Read + Send>| {
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut b = Vec::new();
             let _ = s.read_to_end(&mut b);
-            String::from_utf8_lossy(&b).into_owned()
-        })
+            let _ = tx.send(String::from_utf8_lossy(&b).into_owned());
+        });
+        rx
     };
     let out_t = child.stdout.take().map(|s| drain(Box::new(s)));
     let err_t = child.stderr.take().map(|s| drain(Box::new(s)));
@@ -255,8 +286,9 @@ fn run_claude(claude: &Path, home: &Path, args: &[&str], timeout: Duration) -> R
             Err(_) => return Err("Não consegui executar o Claude Code.".into()),
         }
     };
-    let stdout = out_t.and_then(|t| t.join().ok()).unwrap_or_default();
-    let _ = err_t.and_then(|t| t.join().ok());
+    let left = timeout.saturating_sub(start.elapsed()).max(Duration::from_millis(200));
+    let stdout = out_t.and_then(|r| r.recv_timeout(left).ok()).unwrap_or_default();
+    drop(err_t);
     Ok(Out { ok: status.success(), stdout })
 }
 
@@ -512,6 +544,21 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn never_follows_links_left_next_to_the_config() {
+        let d = TempDir::new().unwrap();
+        let c = cfg_in(&d);
+        std::fs::write(&c, r#"{"mcpServers":{}}"#).unwrap();
+        let victim = d.path().join("outro-arquivo.txt");
+        std::fs::write(&victim, "intacto").unwrap();
+        std::os::unix::fs::symlink(&victim, dir_bak(&c)).unwrap();
+        desktop_connect(&c, MCP).unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "intacto");
+        assert!(!std::fs::symlink_metadata(dir_bak(&c)).unwrap().file_type().is_symlink());
+        assert_eq!(parse(&c)["mcpServers"]["hd-fantasma"]["command"], MCP);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn keeps_config_file_private() {
         use std::os::unix::fs::PermissionsExt;
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
@@ -589,6 +636,24 @@ esac
             assert_eq!(std::fs::read_to_string(&state).unwrap(), MCP);
             let s = disconnect_with(&c, Some("code"), t).unwrap();
             assert!(!s.code.connected && !state.exists());
+        }
+
+        #[test]
+        fn skips_a_claude_others_can_change() {
+            let d = TempDir::new().unwrap();
+            let p = fake_claude(&d, STATEFUL);
+            assert!(find_claude(&ctx(&d)).is_some());
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o777)).unwrap();
+            assert!(find_claude(&ctx(&d)).is_none());
+        }
+
+        #[test]
+        fn leftover_child_does_not_stretch_the_timeout() {
+            let d = TempDir::new().unwrap();
+            fake_claude(&d, "#!/bin/sh\n(sleep 6) &\nexit 0\n");
+            let t0 = Instant::now();
+            let _ = status_with(&ctx(&d), Duration::from_millis(500));
+            assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
         }
 
         #[test]

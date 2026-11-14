@@ -216,3 +216,79 @@ fn reveal_path_stays_inside_the_disk() {
         assert!(cat.resolve_item_path(item.id, &[v.clone()]).is_err(), "aceitou {bad}");
     }
 }
+
+// ---------------------------------------------------------------- audit run-2 (2026-11-14)
+
+#[test]
+fn import_rejects_views_and_triggers() {
+    // A view can return clean rows while being checked and other rows while being copied.
+    assert_rejected_and_untouched(
+        "ALTER TABLE items RENAME TO items_real;
+         CREATE VIEW items AS SELECT * FROM items_real;",
+    );
+    assert_rejected_and_untouched(
+        "CREATE TRIGGER t AFTER INSERT ON disks BEGIN SELECT 1; END;",
+    );
+}
+
+#[test]
+fn import_rejects_ids_near_the_integer_limit() {
+    assert_rejected_and_untouched(
+        "UPDATE items_fts SET rowid=9223372036854775807 WHERE rowid=(SELECT id FROM items WHERE name='c.txt');
+         UPDATE items SET id=9223372036854775807 WHERE name='c.txt';",
+    );
+}
+
+#[test]
+fn import_rejects_huge_names() {
+    assert_rejected_and_untouched("UPDATE items SET name=printf('%.2000c','x') WHERE name='b.txt'");
+}
+
+#[test]
+fn import_rebuilds_search_text_from_names() {
+    let s = tempfile::tempdir().unwrap();
+    // A file can carry any search text; it must not make an item match words it does not have.
+    let file = tampered_export(s.path(), "UPDATE items_fts SET name_norm='senha banco contrato'");
+    let (_d, cat) = victim(s.path());
+    drop(cat);
+    import_bounded(s.path(), &file).unwrap();
+    let cat = Catalog::open(s.path().join("vitima.sqlite")).unwrap();
+    let q = |t: &str| cat.search(&SearchQuery { text: t.into(), ..Default::default() }).unwrap().total;
+    assert_eq!(q("contrato"), 0);
+    assert_eq!(q("b.txt"), 1);
+}
+
+#[test]
+fn deep_folder_chain_imports_in_linear_time() {
+    let s = tempfile::tempdir().unwrap();
+    let n = 20_000;
+    let file = tampered_export(
+        s.path(),
+        &format!(
+            "DELETE FROM items_fts; DELETE FROM items;
+             WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<{n})
+             INSERT INTO items(id,disk_id,parent_id,name,path,kind,ext,size_bytes,created_at,modified_at,child_count,descendant_count)
+             SELECT i, (SELECT id FROM disks), CASE WHEN i=1 THEN NULL ELSE i-1 END, 'd', 'd', 'folder', NULL, 0, NULL, NULL, 1, 0 FROM c;"
+        ),
+    );
+    let (_d, cat) = victim(s.path());
+    drop(cat);
+    let t0 = std::time::Instant::now();
+    let d = import_bounded(s.path(), &file).unwrap();
+    assert!(t0.elapsed() < Duration::from_secs(8), "lento demais: {:?}", t0.elapsed());
+    let cat = Catalog::open(s.path().join("vitima.sqlite")).unwrap();
+    let top = cat.list_children(d.id, None).unwrap();
+    assert_eq!(top[0].descendant_count, (n - 1) as u64);
+}
+
+#[test]
+fn catalog_from_a_newer_version_is_refused_untouched() {
+    let s = tempfile::tempdir().unwrap();
+    let db = s.path().join("c.sqlite");
+    drop(Catalog::open(&db).unwrap());
+    rusqlite::Connection::open(&db).unwrap().execute("UPDATE schema_version SET version=99", []).unwrap();
+    let e = Catalog::open(&db).err().expect("devia recusar").to_string();
+    assert_eq!(e, hdf_core::db::MSG_NEWER_CATALOG);
+    let v: i64 = rusqlite::Connection::open(&db).unwrap().query_row("SELECT version FROM schema_version", [], |r| r.get(0)).unwrap();
+    assert_eq!(v, 99);
+}

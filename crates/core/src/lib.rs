@@ -13,3 +13,6 @@ pub use db::Catalog;
 pub use error::{Error, Result};
 pub use model::*;
 pub use scan::{read_disk, read_disk_as, read_disk_threads};
+
+/// Re-exported so the app checks SQLite error codes with exactly the same version.
+pub use rusqlite;

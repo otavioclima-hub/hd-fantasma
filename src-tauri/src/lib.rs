@@ -215,32 +215,177 @@ async fn claude_disconnect(target: Option<String>) -> CmdResult<claude::ClaudeSt
 
 /// ADR 0015: a janela só pode mostrar a própria interface; qualquer endereço externo é bloqueado.
 fn allow_navigation(url: &tauri::Url) -> bool {
+    let host = url.host_str().unwrap_or("");
+    let plain = url.username().is_empty() && url.password().is_none();
     match url.scheme() {
-        "tauri" | "ipc" | "asset" => true,
-        "http" | "https" => {
-            let host = url.host_str().unwrap_or("");
-            if host == "tauri.localhost" || host == "ipc.localhost" || host == "asset.localhost" {
-                return true;
-            }
-            cfg!(debug_assertions) && host == "localhost" && url.port() == Some(1420)
-        }
+        // macOS/Linux: the app's own pages are tauri://localhost
+        "tauri" => plain && host == "localhost" && url.port().is_none(),
+        // Windows: http://tauri.localhost (no port)
+        "http" if cfg!(windows) => plain && host == "tauri.localhost" && url.port().is_none(),
+        // Development only: the local Vite server.
+        "http" => cfg!(debug_assertions) && plain && host == "localhost" && url.port() == Some(1420),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod nav_tests {
+    use super::allow_navigation;
+
+    fn ok(s: &str) -> bool {
+        allow_navigation(&tauri::Url::parse(s).unwrap())
+    }
+
+    #[test]
+    fn only_the_app_itself() {
+        if !cfg!(windows) {
+            assert!(ok("tauri://localhost/"));
+            assert!(ok("tauri://localhost/index.html#x"));
+        }
+        for bad in [
+            "https://example.com/",
+            "http://tauri.localhost:8080/",
+            "tauri://localhost.evil.com/",
+            "tauri://user@localhost/",
+            "asset://localhost/x",
+            "ipc://localhost/x",
+            "file:///etc/passwd",
+            "data:text/html,hi",
+            "javascript:alert(1)",
+            "http://localhost:3000/",
+        ] {
+            assert!(!ok(bad), "{bad}");
+        }
+    }
+    #[test]
+    fn damaged_catalog_is_kept_aside_and_replaced() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("catalogo.sqlite");
+        std::fs::write(&p, b"isto nao e um banco de dados, so texto qualquer com tamanho suficiente").unwrap();
+        let n = super::prepare_catalog(&p).expect("devia avisar");
+        assert!(!n.fatal, "{}", n.text);
+        let kept: Vec<_> = std::fs::read_dir(d.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("catalogo-danificado-"))
+            .collect();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert!(std::fs::read(d.path().join(&kept[0])).unwrap().starts_with(b"isto nao e"));
+        assert!(hdf_core::Catalog::open(&p).is_ok());
+        assert!(super::prepare_catalog(&p).is_none());
+    }
+
+    #[test]
+    fn newer_catalog_is_not_moved() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("catalogo.sqlite");
+        drop(hdf_core::Catalog::open(&p).unwrap());
+        hdf_core::rusqlite::Connection::open(&p).unwrap().execute("UPDATE schema_version SET version=99", []).unwrap();
+        let n = super::prepare_catalog(&p).unwrap();
+        assert!(n.fatal);
+        assert_eq!(std::fs::read_dir(d.path()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains("danificado")).count(), 0);
+    }
+}
+
+/// What to tell the person at startup when the catalog could not be opened normally.
+struct StartupNotice {
+    text: String,
+    /// The app cannot work: close it after the message.
+    fatal: bool,
+}
+
+/// True only when the file itself is broken (not a database, or damaged). A busy or locked
+/// catalog is never treated as broken.
+fn is_damaged(e: &hdf_core::Error) -> bool {
+    match e {
+        hdf_core::Error::Db(d) => matches!(
+            d.sqlite_error_code(),
+            Some(hdf_core::rusqlite::ErrorCode::NotADatabase) | Some(hdf_core::rusqlite::ErrorCode::DatabaseCorrupt)
+        ),
+        hdf_core::Error::Msg(m) => m == hdf_core::db::MSG_DAMAGED_CATALOG,
+        _ => false,
+    }
+}
+
+/// Opens (creates, migrates) the catalog before the window exists. Never deletes it: a damaged
+/// file is renamed and kept next to the new one, so nothing is lost and the app still opens.
+fn prepare_catalog(path: &std::path::Path) -> Option<StartupNotice> {
+    let mut last = None;
+    for _ in 0..20 {
+        match Catalog::open(path) {
+            Ok(_) => return None,
+            // Another HD Fantasma process (the Claude connection) may be opening it right now.
+            Err(hdf_core::Error::Db(e)) if e.sqlite_error_code() == Some(hdf_core::rusqlite::ErrorCode::DatabaseBusy) => {
+                last = Some(hdf_core::Error::Db(e));
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            Err(e) => {
+                last = Some(e);
+                break;
+            }
+        }
+    }
+    let e = last?;
+    if let hdf_core::Error::Msg(m) = &e {
+        if m == hdf_core::db::MSG_NEWER_CATALOG {
+            return Some(StartupNotice { text: m.clone(), fatal: true });
+        }
+    }
+    if !is_damaged(&e) {
+        return Some(StartupNotice { text: format!("Não foi possível abrir o catálogo: {e}"), fatal: true });
+    }
+    let stamp = hdf_core::db::now_iso().replace([':', 'T'], "-");
+    let stamp: String = stamp.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(19).collect();
+    let kept = format!("catalogo-danificado-{stamp}.sqlite");
+    let aside = path.with_file_name(&kept);
+    if std::fs::rename(path, &aside).is_err() {
+        return Some(StartupNotice { text: format!("O catálogo está danificado e não pude guardá-lo de lado: {e}"), fatal: true });
+    }
+    for side in ["-wal", "-shm"] {
+        let mut from = path.as_os_str().to_owned();
+        from.push(side);
+        let mut to = aside.as_os_str().to_owned();
+        to.push(side);
+        let _ = std::fs::rename(from, to);
+    }
+    match Catalog::open(path) {
+        Ok(_) => Some(StartupNotice {
+            text: format!(
+                "O catálogo não pôde ser aberto ({e}). Ele foi guardado como \"{kept}\", na mesma pasta, e um catálogo novo e vazio foi criado. Para ter os discos de volta, leia-os de novo ou importe exportações."
+            ),
+            fatal: false,
+        }),
+        Err(e2) => Some(StartupNotice { text: format!("Não foi possível criar um catálogo novo: {e2}"), fatal: true }),
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let catalog_path = hdf_core::db::default_catalog_path().expect("pasta Documentos não encontrada");
-    // Cria a pasta e o esquema já na abertura do app.
-    Catalog::open(&catalog_path).expect("não foi possível abrir o catálogo");
+    // Cria a pasta e o esquema já na abertura do app; se der errado, avisa na janela.
+    let notice = prepare_catalog(&catalog_path);
     tauri::Builder::default()
-        .setup(|app| {
+        .setup(move |app| {
             use tauri::WebviewWindowBuilder;
             // Janela principal criada aqui para travar a navegação (ADR 0015).
             let cfg = app.config().app.windows[0].clone();
             WebviewWindowBuilder::from_config(app.handle(), &cfg)?
                 .on_navigation(allow_navigation)
                 .build()?;
+            if let Some(n) = notice {
+                use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                let handle = app.handle().clone();
+                app.dialog()
+                    .message(n.text)
+                    .title("HD Fantasma")
+                    .kind(if n.fatal { MessageDialogKind::Error } else { MessageDialogKind::Warning })
+                    .show(move |_| {
+                        if n.fatal {
+                            handle.exit(1);
+                        }
+                    });
+            }
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())

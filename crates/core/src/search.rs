@@ -110,6 +110,40 @@ impl Catalog {
         Ok(v)
     }
 
+    /// One page of a folder plus its total, without loading every sibling into memory.
+    pub fn list_children_page(
+        &self,
+        disk_id: i64,
+        parent_id: Option<i64>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(Vec<Item>, u64)> {
+        let total: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM items i WHERE i.disk_id=?1 AND i.parent_id IS ?2",
+            params![disk_id, parent_id],
+            |r| r.get(0),
+        )?;
+        let mut st = self.conn.prepare_cached(&format!(
+            "SELECT {ITEM_COLS} FROM items i WHERE i.disk_id=?1 AND i.parent_id IS ?2
+             ORDER BY (i.kind != 'folder'), i.name COLLATE NOCASE, i.id LIMIT ?3 OFFSET ?4"
+        ))?;
+        let v = st
+            .query_map(params![disk_id, parent_id, limit, offset], row_to_item)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok((v, total as u64))
+    }
+
+    /// Children of a folder with exactly this name (usually one).
+    pub fn find_child_named(&self, disk_id: i64, parent_id: Option<i64>, name: &str) -> Result<Vec<Item>> {
+        let mut st = self.conn.prepare_cached(&format!(
+            "SELECT {ITEM_COLS} FROM items i WHERE i.disk_id=?1 AND i.parent_id IS ?2 AND i.name=?3 LIMIT 10"
+        ))?;
+        let v = st
+            .query_map(params![disk_id, parent_id, name], row_to_item)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(v)
+    }
+
     pub fn get_item(&self, id: i64) -> Result<Item> {
         self.conn
             .query_row(
