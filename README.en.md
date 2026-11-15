@@ -34,6 +34,7 @@ If you work with video, photo, audio or design, you probably have a drawer full 
 - **Never uses the internet.** It sends nothing to anyone, has no account and does not check for updates by itself.
 - **Never writes to your disks.** It only reads. The catalog stays on your computer.
 - **Cloud folders (Google Drive, Dropbox, iCloud):** only what is already downloaded on the Mac is cataloged. It never downloads anything from the cloud.
+- **On the Mac's internal disk, it skips what isn't yours:** system folders, other apps' private data (`Library/Containers` and `Group Containers`) and the inside of Photos, Music and TV libraries (each library shows as a single item). That way macOS doesn't ask for permission folder by folder.
 
 ## Download and install (Mac)
 
@@ -71,6 +72,8 @@ From then on it opens normally.
 ## Where the catalog lives
 
 On your Mac, at **Documents → HD Fantasma → `catalogo.sqlite`**. It is a single file; to back it up, copy that file.
+
+It is small: a video drive with a few thousand files takes a few MB; a Mac's whole internal disk (almost 3 million files) is about 500 MB. When idle, the app uses about 30 MB of memory.
 
 ## Use it with Claude
 
@@ -126,7 +129,8 @@ It stays in the catalog, marked as absent. You can browse and search it as usual
   scripts/build-release-mac.sh
   ```
 
-  It builds the MCP (`scripts/build-mcp-sidecar.sh --universal`), runs `npm run tauri build -- --target universal-apple-darwin --bundles app,dmg` and checks that the `.app` contains both programs as universal binaries.
+  It builds the MCP (`scripts/build-mcp-sidecar.sh --universal`), runs `npm run tauri build -- --target universal-apple-darwin --bundles app,dmg`, checks that the `.app` contains both programs as universal binaries and keeps **only the `.dmg`** in `instalador/` (no `.app` is left in the project folder). With a local code-signing certificate named "HD Fantasma Local" in the keychain it signs with it, so macOS keeps Full Disk Access across versions.
+- **Install on your own Mac** from that `.dmg` (into Applications, checked to be identical): `scripts/install-mac.sh`.
 - **Third-party licenses:** `python3 scripts/gen-third-party-licenses.py` regenerates `THIRD_PARTY_LICENSES.md`.
 - **Decisions:** [`docs/adr/`](docs/adr/) (Portuguese). **Vocabulary:** [`CONTEXT.md`](CONTEXT.md). **Plan:** [`PLANO.md`](PLANO.md).
 
