@@ -1,0 +1,99 @@
+# Builds and tests the Windows version on a real Windows machine (GitHub's runner).
+# The installer (.exe) is kept as a downloadable artifact of each run; releases are made by hand
+# from it (see docs/WINDOWS.md). Only actions published by GitHub itself are used, and the job
+# token stays read-only.
+name: Windows
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Rust (stable)
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustc -vV
+
+      - name: Interface dependencies
+        run: npm ci
+
+      - name: No-network check (ADR 0015)
+        run: |
+          for p in hd-fantasma hd-fantasma-mcp; do
+            for net in reqwest hyper mio socket2 ureq; do
+              if cargo tree --locked -p "$p" -e normal --target x86_64-pc-windows-msvc -i "$net" 2>/dev/null | grep -q "^$net v"; then
+                echo "NETWORK LIBRARY FOUND: $net in $p" >&2; exit 1
+              fi
+            done
+          done
+          echo "ok: no networking library"
+
+      - name: Interface check
+        run: npm run check
+
+      - name: Tests (engine, MCP, app)
+        run: cargo test --locked --workspace
+
+      - name: MCP sidecar
+        run: scripts/build-mcp-sidecar.sh
+
+      - name: App and installer (NSIS)
+        run: npm run tauri build -- --bundles nsis -- --locked
+
+      - name: Check and name the installer
+        id: pack
+        run: |
+          set -euo pipefail
+          EXE="$(ls -t target/release/bundle/nsis/*.exe | head -n 1)"
+          VERSION="$(node -p "require('./package.json').version")"
+          OUT="HD-Fantasma-${VERSION}-windows-x64-setup.exe"
+          mkdir -p dist
+          cp "$EXE" "dist/$OUT"
+          test -f target/release/hd-fantasma.exe
+          test -f target/release/hd-fantasma-mcp.exe
+          target/release/hd-fantasma-mcp.exe --version
+          # ADR 0015: neither program may load a Windows networking library.
+          for f in target/release/hd-fantasma.exe target/release/hd-fantasma-mcp.exe; do
+            if grep -aiqE "ws2_32\.dll|winhttp\.dll|wininet\.dll|iphlpapi\.dll|dnsapi\.dll" "$f"; then
+              echo "NETWORK DLL REFERENCED BY $f" >&2; exit 1
+            fi
+          done
+          echo "ok: no networking DLL"
+          (cd dist && sha256sum "$OUT" | tee "$OUT.sha256")
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HD-Fantasma-windows-x64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
