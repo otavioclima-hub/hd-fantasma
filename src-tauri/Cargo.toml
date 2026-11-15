@@ -1,6 +1,6 @@
 [package]
 name = "hd-fantasma"
-version = "0.1.0"
+version = "0.2.0"
 description = "HD Fantasma — disk catalog"
 authors = ["Otavio Lima"]
 license = "MIT"
