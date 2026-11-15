@@ -247,6 +247,7 @@ export const mock = {
     return { ...d };
   },
   async cancel_read(): Promise<void> { cancelled = true; },
+  async wait_catalog_ready(): Promise<void> {},
   async disk_access(a: { mountPath: string }): Promise<"ok" | "needed"> { return a.mountPath === "/" ? "needed" : "ok"; },
   async open_disk_access_settings(): Promise<void> {},
   async list_children(a: { diskId: number; parentId: number | null }): Promise<Item[]> {

@@ -138,7 +138,6 @@ fn walk_threads() -> usize {
 
 /// Dados de só leitura compartilhados pelas threads leitoras.
 struct Shared<'a> {
-    disk_id: i64,
     include_hidden: bool,
     is_slash: bool,
     allowed_devs: Vec<u64>,
@@ -174,22 +173,20 @@ impl Shared<'_> {
     }
 
     /// Monta a linha de um arquivo (só com o que a listagem já trouxe; nunca abre o arquivo).
-    fn make_file(&self, e: &DirEntry, rel: String, parent: Option<i64>) -> Out {
+    /// Files carry no path: the catalog rebuilds it from the folder (ADR 0018).
+    fn make_file(&self, e: &DirEntry, parent: Option<i64>) -> Out {
         let ext = ext_of(&e.name);
         let kind = Kind::from_ext(ext.as_deref());
-        Out::File(Item {
+        Out::File(Row {
             id: self.alloc(),
-            disk_id: self.disk_id,
             parent_id: parent,
             name: e.name.clone(),
-            path: rel,
+            path: None,
             kind,
             ext,
-            size_bytes: e.size,
-            created_at: e.created.map(iso_from_unix),
-            modified_at: e.modified.map(iso_from_unix),
-            child_count: 0,
-            descendant_count: 0,
+            size: e.size,
+            created: e.created,
+            modified: e.modified,
         })
     }
 }
@@ -218,9 +215,23 @@ impl Queue {
     }
 }
 
+/// One row to write: only what the catalog stores (dates in Unix seconds, ADR 0018).
+struct Row {
+    id: i64,
+    parent_id: Option<i64>,
+    name: String,
+    /// Folders only.
+    path: Option<String>,
+    kind: Kind,
+    ext: Option<String>,
+    size: u64,
+    created: Option<i64>,
+    modified: Option<i64>,
+}
+
 enum Out {
-    Folder(Item),
-    File(Item),
+    Folder(Row),
+    File(Row),
 }
 
 /// Resumo de uma pasta já listada.
@@ -237,6 +248,8 @@ struct Agg {
 }
 
 struct Batch {
+    /// Folder these rows come from (for the progress line).
+    dir: String,
     rows: Vec<Out>,
     /// Quando a pasta acabou.
     agg: Option<Agg>,
@@ -250,7 +263,7 @@ fn process_job(sh: &Shared, job: &Job, tx: &SyncSender<Batch>, children: &mut Ve
             // Pasta só na nuvem: pula em silêncio (não é falha de leitura).
             let Some(id) = job.id else { return true };
             let agg = Agg { id, size: 0, count: 0, files: 0, policy_skip: true };
-            return tx.send(Batch { rows: Vec::new(), agg: Some(agg) }).is_ok();
+            return tx.send(Batch { dir: job.rel.clone(), rows: Vec::new(), agg: Some(agg) }).is_ok();
         }
         Err(ListErr::Failed) => {
             sh.skipped.fetch_add(1, Ordering::Relaxed);
@@ -267,32 +280,29 @@ fn process_job(sh: &Shared, job: &Job, tx: &SyncSender<Batch>, children: &mut Ve
         if !sh.include_hidden && is_ignored(&e.name) {
             continue;
         }
-        let rel = if job.rel.is_empty() { e.name.clone() } else { format!("{}/{}", job.rel, e.name) };
         if e.is_dir {
+            let rel = if job.rel.is_empty() { e.name.clone() } else { format!("{}/{}", job.rel, e.name) };
             if sh.skip_dir(&rel, e.dev) {
                 continue;
             }
             let id = sh.alloc();
-            rows.push(Out::Folder(Item {
+            rows.push(Out::Folder(Row {
                 id,
-                disk_id: sh.disk_id,
                 parent_id: job.id,
                 name: e.name.clone(),
-                path: rel.clone(),
+                path: Some(rel.clone()),
                 kind: Kind::Folder,
                 ext: None,
-                size_bytes: 0,
-                created_at: e.created.map(iso_from_unix),
-                modified_at: e.modified.map(iso_from_unix),
-                child_count: 0,
-                descendant_count: 0,
+                size: 0,
+                created: e.created,
+                modified: e.modified,
             }));
             if !(sh.is_slash && is_media_library(&e.name)) {
                 children.push(Job { dir: e.path_in(&job.dir), rel, id: Some(id) });
             }
             count += 1;
         } else {
-            rows.push(sh.make_file(e, rel, job.id));
+            rows.push(sh.make_file(e, job.id));
             sh.bytes_seen.fetch_add(e.alloc, Ordering::Relaxed);
             size = size.saturating_add(e.size);
             count += 1;
@@ -303,13 +313,13 @@ fn process_job(sh: &Shared, job: &Job, tx: &SyncSender<Batch>, children: &mut Ve
                 return false;
             }
             let full = std::mem::replace(&mut rows, Vec::with_capacity(BATCH_ROWS));
-            if tx.send(Batch { rows: full, agg: None }).is_err() {
+            if tx.send(Batch { dir: job.rel.clone(), rows: full, agg: None }).is_err() {
                 return false;
             }
         }
     }
     let agg = job.id.map(|id| Agg { id, size, count, files, policy_skip: false });
-    tx.send(Batch { rows, agg }).is_ok()
+    tx.send(Batch { dir: job.rel.clone(), rows, agg }).is_ok()
 }
 
 fn worker(sh: &Shared, q: &Queue, tx: SyncSender<Batch>) {
@@ -389,6 +399,7 @@ fn empty_dirs(dirs: &[(i64, Option<i64>, u64, bool)]) -> HashSet<i64> {
 
 /// A thread escritora: dona da conexão SQLite.
 struct Writer<'a> {
+    disk_id: i64,
     ins: Statement<'a>,
     upd: Statement<'a>,
     del: Statement<'a>,
@@ -426,19 +437,19 @@ impl<'a> Writer<'a> {
         });
     }
 
-    fn insert(&mut self, it: &Item) -> Result<()> {
+    fn insert(&mut self, it: &Row) -> Result<()> {
         self.ins.execute(params![
             it.id,
-            it.disk_id,
+            self.disk_id,
             it.parent_id,
             it.name,
             it.path,
             it.kind.as_str(),
             it.ext,
-            it.size_bytes as i64,
-            it.created_at,
-            it.modified_at,
-            it.child_count as i64,
+            it.size.min(i64::MAX as u64) as i64,
+            it.created,
+            it.modified,
+            0i64,
         ])?;
         Ok(())
     }
@@ -448,7 +459,7 @@ impl<'a> Writer<'a> {
             Out::Folder(item) => {
                 self.insert(&item)?;
                 self.item_count += 1;
-                let cloud = is_cloud_rel(&self.root_str, &item.path);
+                let cloud = is_cloud_rel(&self.root_str, item.path.as_deref().unwrap_or(""));
                 let d = self.dirs.entry(item.id).or_default();
                 d.parent = item.parent_id;
                 d.cloud = cloud;
@@ -456,7 +467,7 @@ impl<'a> Writer<'a> {
             Out::File(item) => {
                 self.insert(&item)?;
                 self.item_count += 1;
-                self.total_bytes = self.total_bytes.saturating_add(item.size_bytes);
+                self.total_bytes = self.total_bytes.saturating_add(item.size);
             }
         }
         Ok(())
@@ -490,8 +501,9 @@ impl<'a> Writer<'a> {
                         let mut last: Option<String> = None;
                         if let Some(o) = batch.rows.last() {
                             last = Some(match o {
-                                Out::Folder(i) => i.path.clone(),
-                                Out::File(item) => item.path.clone(),
+                                Out::Folder(i) => i.path.clone().unwrap_or_default(),
+                                Out::File(f) if batch.dir.is_empty() => f.name.clone(),
+                                Out::File(f) => format!("{}/{}", batch.dir, f.name),
                             });
                         }
                         self.seen += batch.rows.len() as u64;
@@ -705,7 +717,6 @@ fn read_disk_inner(
     {
         let conn: &Connection = &tx;
         let sh = Shared {
-            disk_id,
             include_hidden: opts.include_hidden,
             is_slash,
             allowed_devs,
@@ -716,6 +727,7 @@ fn read_disk_inner(
             bytes_seen: &bytes_seen,
         };
         let mut w = Writer {
+            disk_id,
             ins: conn.prepare(
                 "INSERT INTO items(id,disk_id,parent_id,name,path,kind,ext,size_bytes,created_at,modified_at,child_count)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
@@ -747,17 +759,13 @@ fn read_disk_inner(
         skipped = sh.skipped.load(Ordering::Relaxed);
     }
 
-    // Índice de busca (ADR 0012): só agora, de uma vez. Apaga as linhas de busca antigas do
-    // disco (os itens antigos ainda existem aqui) e refaz tudo com um INSERT ... SELECT.
+    // Índice de busca (ADR 0012): só agora, de uma vez, com um INSERT ... SELECT. (The disk's
+    // old rows already left the index at the start, with its old items.)
     progress(ReadProgress {
         bytes_seen: bytes_seen.load(Ordering::Relaxed),
         bytes_expected,
         ..ReadProgress::new(vol.uuid.clone(), Phase::Saving, item_count, Some("Montando o índice de busca".into()))
     });
-    tx.execute(
-        "DELETE FROM items_fts WHERE rowid IN (SELECT id FROM items WHERE disk_id=?1)",
-        [disk_id],
-    )?;
     // Sem fusões automáticas de segmentos durante a carga em massa (voltam ao normal depois).
     tx.execute("INSERT INTO items_fts(items_fts, rank) VALUES('automerge', 0)", [])?;
     tx.execute(
@@ -770,6 +778,7 @@ fn read_disk_inner(
         params![disk_id, item_count as i64, total_bytes.min(i64::MAX as u64) as i64, now],
     )?;
     tx.commit()?;
+    crate::db::release_free_space(&catalog.conn);
 
     let mut disk = catalog.get_disk(disk_id)?;
     disk.present = true;
@@ -797,7 +806,6 @@ mod tests {
 
     fn shared<'a>(cancel: &'a AtomicBool, next: &'a AtomicI64, devs: Vec<u64>) -> Shared<'a> {
         Shared {
-            disk_id: 1,
             include_hidden: false,
             is_slash: false,
             allowed_devs: devs,

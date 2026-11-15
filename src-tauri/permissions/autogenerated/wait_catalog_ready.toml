@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wait-catalog-ready"
+description = "Enables the wait_catalog_ready command without any pre-configured scope."
+commands.allow = ["wait_catalog_ready"]
+
+[[permission]]
+identifier = "deny-wait-catalog-ready"
+description = "Denies the wait_catalog_ready command without any pre-configured scope."
+commands.deny = ["wait_catalog_ready"]

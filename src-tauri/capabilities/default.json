@@ -10,6 +10,7 @@
     "core:event:allow-unlisten",
     "dialog:allow-open",
     "dialog:allow-save",
+    "allow-wait-catalog-ready",
     "allow-list-disks",
     "allow-list-mounted-volumes",
     "allow-read-disk",

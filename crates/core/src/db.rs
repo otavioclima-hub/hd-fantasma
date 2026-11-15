@@ -6,11 +6,25 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::path::{Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
-/// Colunas de `items` na ordem lida por [`row_to_item`].
-pub const ITEM_COLS: &str = "i.id, i.disk_id, i.parent_id, i.name, i.path, i.kind, i.ext, \
-    i.size_bytes, i.created_at, i.modified_at, i.child_count, i.descendant_count";
+/// Colunas de `items` na ordem lida por [`row_to_item`]. Needs [`ITEM_JOIN`] (`p` = the parent):
+/// files keep no path of their own (ADR 0018), it is the parent folder's path plus the name;
+/// dates are stored as Unix seconds and come back as ISO text.
+pub const ITEM_COLS: &str = "i.id, i.disk_id, i.parent_id, i.name, \
+    CASE WHEN i.path IS NOT NULL THEN i.path WHEN p.path IS NULL THEN i.name ELSE p.path || '/' || i.name END, \
+    i.kind, i.ext, i.size_bytes, \
+    strftime('%Y-%m-%dT%H:%M:%SZ', i.created_at, 'unixepoch'), \
+    strftime('%Y-%m-%dT%H:%M:%SZ', i.modified_at, 'unixepoch'), \
+    i.child_count, i.descendant_count";
+
+/// Join that every query using [`ITEM_COLS`] needs, right after `items i`.
+pub const ITEM_JOIN: &str = "LEFT JOIN items p ON p.id = i.parent_id";
+
+/// Search index (ADR 0018): trigrams without positions. Queries use GLOB/LIKE, which this index
+/// answers exactly (SQLite checks every candidate against the stored text).
+pub(crate) const FTS_CREATE: &str =
+    "CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(name_norm, tokenize='trigram', detail=none, columnsize=0);";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -30,19 +44,18 @@ CREATE TABLE IF NOT EXISTS items (
     disk_id INTEGER NOT NULL REFERENCES disks(id) ON DELETE CASCADE,
     parent_id INTEGER,
     name TEXT NOT NULL,
-    path TEXT NOT NULL,
+    -- Only folders keep their path; a file's path is its folder's path + its name (ADR 0018).
+    path TEXT,
     kind TEXT NOT NULL,
     ext TEXT,
     size_bytes INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT,
-    modified_at TEXT,
+    -- Unix seconds (UTC).
+    created_at INTEGER,
+    modified_at INTEGER,
     child_count INTEGER NOT NULL DEFAULT 0,
     descendant_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_items_parent ON items(disk_id, parent_id);
-CREATE INDEX IF NOT EXISTS idx_items_dup ON items(name, size_bytes);
--- Busca: trigramas sobre o nome normalizado (minúsculo, sem acento). rowid = items.id.
-CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(name_norm, tokenize='trigram');
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 "#;
 
@@ -65,13 +78,26 @@ pub(crate) fn remove_disk_from_search(conn: &Connection, disk_id: i64) -> Result
          FROM items_fts f JOIN items i ON i.id = f.rowid WHERE i.disk_id <> ?1",
         [disk_id],
     )?;
+    conn.execute_batch("DROP TABLE items_fts;")?;
+    conn.execute_batch(FTS_CREATE)?;
     conn.execute_batch(
-        "DROP TABLE items_fts;
-         CREATE VIRTUAL TABLE items_fts USING fts5(name_norm, tokenize='trigram');
-         INSERT INTO items_fts(rowid, name_norm) SELECT id, name_norm FROM temp.hdf_keep_fts;
+        "INSERT INTO items_fts(rowid, name_norm) SELECT id, name_norm FROM temp.hdf_keep_fts;
          DROP TABLE temp.hdf_keep_fts;",
     )?;
     Ok(())
+}
+
+/// Indexes created after the tables (also by the v4 migration, on the rebuilt table).
+const INDEXES: &str = "
+CREATE INDEX IF NOT EXISTS idx_items_parent ON items(disk_id, parent_id);
+-- Duplicates (ADR 0007): files by size; the name is compared on the few rows of each size.
+CREATE INDEX IF NOT EXISTS idx_items_size ON items(size_bytes) WHERE kind != 'folder';
+";
+
+/// Gives free pages back to the file system (after removing or re-reading a disk). Only does
+/// something on catalogs in incremental auto-vacuum mode (all catalogs since v4).
+pub(crate) fn release_free_space(conn: &Connection) {
+    let _ = conn.execute_batch("PRAGMA incremental_vacuum;");
 }
 
 /// Minúsculas e sem acentos: "Vídeo" -> "video".
@@ -129,6 +155,11 @@ impl Catalog {
 
     fn init(conn: Connection, path: PathBuf) -> Result<Catalog> {
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
+        // A brand-new file: incremental auto-vacuum must be chosen before anything is written.
+        let empty: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        if empty == 0 {
+            conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+        }
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -169,6 +200,7 @@ impl Catalog {
         }
         let tx = self.conn.unchecked_transaction()?;
         tx.execute_batch(SCHEMA)?;
+        tx.execute_batch(FTS_CREATE)?;
         if v == 1 {
             // v2: o app nunca abre arquivos. Some o conteúdo compactado (inside_archive) e os
             // dados de vídeo. Catálogos antigos continuam abrindo; o resto fica como estava.
@@ -186,15 +218,24 @@ impl Catalog {
                 [],
             )?;
         }
-        if v >= 1 {
+        if (1..3).contains(&v) {
             // v3: total de itens dentro de cada pasta (`descendant_count`); calcula para o que já existe.
             // (Catálogo novo já nasce com a coluna no SCHEMA.)
             tx.execute("ALTER TABLE items ADD COLUMN descendant_count INTEGER NOT NULL DEFAULT 0", [])?;
             recompute_descendants(&tx, None).map_err(|_| Error::msg(MSG_DAMAGED_CATALOG))?;
         }
+        if (1..4).contains(&v) {
+            migrate_to_v4(&tx)?;
+        }
+        tx.execute_batch(INDEXES)?;
         tx.execute("DELETE FROM schema_version", [])?;
         tx.execute("INSERT INTO schema_version(version) VALUES (?1)", [SCHEMA_VERSION])?;
         tx.commit()?;
+        if (1..4).contains(&v) {
+            // Shrink the file once and switch to incremental auto-vacuum. Needs no other
+            // connection busy on the catalog; if one is, it is simply tried again next time.
+            let _ = self.conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL; VACUUM;");
+        }
         Ok(())
     }
 
@@ -277,6 +318,7 @@ impl Catalog {
         tx.execute("DELETE FROM items WHERE disk_id=?1", [id])?;
         tx.execute("DELETE FROM disks WHERE id=?1", [id])?;
         tx.commit()?;
+        release_free_space(&self.conn);
         Ok(())
     }
 
@@ -373,7 +415,7 @@ impl Catalog {
             return Err(Error::msg("Arquivo de exportação não encontrado."));
         }
         // Valida antes de anexar.
-        {
+        let imp_version = {
             let probe = Connection::open_with_flags(
                 readonly_uri(src)?,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
@@ -397,12 +439,14 @@ impl Catalog {
                     "Esta exportação foi feita por uma versão mais nova do HD Fantasma. Atualize o app.",
                 ));
             }
-        }
+            v
+        };
         // Attached read-only and immutable: importing never writes anything next to the file
         // (no -wal/-shm, no lock), wherever it lives.
         self.conn.execute("ATTACH DATABASE ?1 AS imp", [readonly_uri(src)?])?;
         let r = (|| -> Result<i64> {
-            validate_import(&self.conn)?;
+            let v4 = imp_version >= 4;
+            validate_import(&self.conn, v4)?;
             let src_disk: (String, String, String, i64, i64, i64, i64, String) = self
                 .conn
                 .query_row(
@@ -452,19 +496,29 @@ impl Catalog {
                     [],
                     |r| r.get(0),
                 )?;
-                let keep = if old_fmt { "WHERE inside_archive=0" } else { "" };
                 let keep_i = if old_fmt { "WHERE i.inside_archive=0" } else { "" };
+                // Older exports: full path on every item and ISO dates. Files keep their own
+                // path only when it is not folder path + name (same rule as the v4 migration).
+                let (path_col, date_cols) = if v4 {
+                    ("i.path", "i.created_at, i.modified_at")
+                } else {
+                    (
+                        "CASE WHEN i.kind = 'folder' THEN i.path
+                              WHEN i.path IS (CASE WHEN p.path IS NULL THEN i.name ELSE p.path || '/' || i.name END) THEN NULL
+                              ELSE i.path END",
+                        "CAST(strftime('%s', i.created_at) AS INTEGER), CAST(strftime('%s', i.modified_at) AS INTEGER)",
+                    )
+                };
                 self.conn.execute(
                     &format!(
                         "INSERT INTO main.items(id,disk_id,parent_id,name,path,kind,ext,size_bytes,created_at,modified_at,child_count)
-                         SELECT id+?1, ?2, CASE WHEN parent_id IS NULL THEN NULL ELSE parent_id+?1 END,
-                            name,path,kind,ext,size_bytes,created_at,modified_at,child_count
-                         FROM imp.items {keep}"
+                         SELECT i.id+?1, ?2, CASE WHEN i.parent_id IS NULL THEN NULL ELSE i.parent_id+?1 END,
+                            i.name, {path_col}, i.kind, i.ext, i.size_bytes, {date_cols}, i.child_count
+                         FROM imp.items i LEFT JOIN imp.items p ON p.id = i.parent_id {keep_i}"
                     ),
                     params![offset, disk_id],
                 )?;
                 // The search text is rebuilt from the names, never taken from the file.
-                let _ = keep_i;
                 self.conn.create_scalar_function(
                     "hdf_norm",
                     1,
@@ -494,6 +548,7 @@ impl Catalog {
         })();
         let _ = self.conn.execute_batch("DETACH DATABASE imp");
         let id = r?;
+        release_free_space(&self.conn);
         self.get_disk(id)
     }
 }
@@ -519,7 +574,7 @@ fn readonly_uri(path: &Path) -> Result<String> {
 /// An export comes from someone else's computer: check every value before copying it in.
 /// SQLite accepts any type in any column, so types are checked here; paths must stay inside
 /// the disk (relative, no `..`), and every parent must exist in the same file.
-fn validate_import(conn: &Connection) -> Result<()> {
+fn validate_import(conn: &Connection, v4: bool) -> Result<()> {
     let bad = |sql: &str| -> Result<bool> {
         match conn.query_row(sql, [], |r| r.get::<_, i64>(0)) {
             Ok(n) => Ok(n != 0),
@@ -535,17 +590,31 @@ fn validate_import(conn: &Connection) -> Result<()> {
          OR typeof(total_bytes)!='integer' OR total_bytes<0";
     // Ids stay far from the integer limit (id + offset must never overflow); names and paths
     // keep the sizes a real disk can have.
-    let items = "SELECT COUNT(*) FROM imp.items WHERE typeof(id)!='integer' OR id<1 OR id>1000000000000
+    // v4 exports: files may have no path (it is rebuilt from the folder) and dates are integers.
+    let (path_types, date_types) = if v4 {
+        ("typeof(path) NOT IN ('text','null') OR (path IS NULL AND kind='folder')", "('integer','null')")
+    } else {
+        ("typeof(path)!='text'", "('text','null')")
+    };
+    let items = format!(
+        "SELECT COUNT(*) FROM imp.items WHERE typeof(id)!='integer' OR id<1 OR id>1000000000000
          OR typeof(parent_id) NOT IN ('integer','null') OR parent_id=id
          OR typeof(name)!='text' OR name='' OR instr(name,'/')>0 OR instr(name,char(0))>0 OR length(name)>1024
-         OR typeof(path)!='text' OR path='' OR instr(path,char(0))>0 OR length(path)>32768
+         OR {path_types} OR path='' OR instr(path,char(0))>0 OR length(path)>32768
          OR path LIKE '/%' OR path='..' OR path LIKE '../%' OR path LIKE '%/../%' OR path LIKE '%/..'
          OR typeof(kind)!='text'
          OR typeof(ext) NOT IN ('text','null')
          OR typeof(size_bytes)!='integer' OR size_bytes<0
          OR typeof(child_count)!='integer' OR child_count<0
-         OR typeof(created_at) NOT IN ('text','null')
-         OR typeof(modified_at) NOT IN ('text','null')";
+         OR typeof(created_at) NOT IN {date_types}
+         OR typeof(modified_at) NOT IN {date_types}"
+    );
+    // A file whose path is rebuilt needs a parent folder with a path.
+    let no_base = if v4 {
+        "SELECT COUNT(*) FROM imp.items i JOIN imp.items p ON p.id=i.parent_id WHERE i.path IS NULL AND p.path IS NULL"
+    } else {
+        "SELECT 0"
+    };
     // Only plain tables are read. A view (or trigger) in someone else's file could return
     // different rows on each read, so what was validated would not be what gets copied.
     let schema = "SELECT (SELECT COUNT(*) FROM imp.sqlite_master WHERE type NOT IN ('table','index'))
@@ -557,9 +626,53 @@ fn validate_import(conn: &Connection) -> Result<()> {
     }
     let orphans = "SELECT COUNT(*) FROM imp.items i WHERE i.parent_id IS NOT NULL
          AND NOT EXISTS (SELECT 1 FROM imp.items p WHERE p.id=i.parent_id)";
-    if bad(disks)? || bad(items)? || bad(orphans)? {
+    if bad(disks)? || bad(&items)? || bad(orphans)? || bad(no_base)? {
         return Err(Error::msg(INVALID_EXPORT));
     }
+    Ok(())
+}
+
+/// v4 (ADR 0018): files lose their stored path (rebuilt from the folder), dates become Unix
+/// seconds, the search index drops positions and the duplicates index keeps only the size.
+fn migrate_to_v4(tx: &Connection) -> Result<()> {
+    tx.execute_batch(
+        "DROP INDEX IF EXISTS idx_items_dup;
+         DROP INDEX IF EXISTS idx_items_parent;
+         CREATE TABLE items_v4 (
+            id INTEGER PRIMARY KEY,
+            disk_id INTEGER NOT NULL REFERENCES disks(id) ON DELETE CASCADE,
+            parent_id INTEGER,
+            name TEXT NOT NULL,
+            path TEXT,
+            kind TEXT NOT NULL,
+            ext TEXT,
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER,
+            modified_at INTEGER,
+            child_count INTEGER NOT NULL DEFAULT 0,
+            descendant_count INTEGER NOT NULL DEFAULT 0
+         );
+         -- A file keeps its own path only if it is not exactly folder path + name.
+         INSERT INTO items_v4
+         SELECT i.id, i.disk_id, i.parent_id, i.name,
+                CASE WHEN i.kind = 'folder' THEN i.path
+                     WHEN i.path IS (CASE WHEN p.path IS NULL THEN i.name ELSE p.path || '/' || i.name END) THEN NULL
+                     ELSE i.path END,
+                i.kind, i.ext, i.size_bytes,
+                CAST(strftime('%s', i.created_at) AS INTEGER),
+                CAST(strftime('%s', i.modified_at) AS INTEGER),
+                i.child_count, i.descendant_count
+         FROM items i LEFT JOIN items p ON p.id = i.parent_id;
+         DROP TABLE items;
+         ALTER TABLE items_v4 RENAME TO items;
+         CREATE TEMP TABLE hdf_keep_fts AS SELECT rowid AS id, name_norm FROM items_fts;
+         DROP TABLE items_fts;",
+    )?;
+    tx.execute_batch(FTS_CREATE)?;
+    tx.execute_batch(
+        "INSERT INTO items_fts(rowid, name_norm) SELECT id, name_norm FROM temp.hdf_keep_fts;
+         DROP TABLE temp.hdf_keep_fts;",
+    )?;
     Ok(())
 }
 

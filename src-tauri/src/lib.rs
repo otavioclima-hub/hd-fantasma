@@ -13,6 +13,8 @@ struct AppState {
     catalog_path: PathBuf,
     cancel: Arc<AtomicBool>,
     reading: Arc<AtomicBool>,
+    /// The catalog was opened (and converted, if it came from an older version).
+    ready: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
 }
 
 type CmdResult<T> = std::result::Result<T, String>;
@@ -25,6 +27,22 @@ fn open(state: &AppState) -> CmdResult<Catalog> {
     Catalog::open(&state.catalog_path).map_err(err)
 }
 
+/// After a big job (reading, removing or importing a disk) the memory it used is already freed,
+/// but macOS keeps it reserved for the app. This hands it back, so the idle app stays small.
+#[cfg(target_os = "macos")]
+fn release_memory() {
+    unsafe extern "C" {
+        fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+    }
+    // SAFETY: a null zone means "all zones"; goal 0 means "as much as possible". No pointers kept.
+    unsafe {
+        malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn release_memory() {}
+
 /// Roda trabalho de banco/disco fora da thread da janela.
 async fn blocking<T, F>(f: F) -> CmdResult<T>
 where
@@ -34,6 +52,22 @@ where
     tauri::async_runtime::spawn_blocking(f)
         .await
         .map_err(|_| "Erro interno do aplicativo.".to_string())?
+}
+
+/// Waits until the catalog is open. Converting an older catalog can take a few seconds (ADR
+/// 0018), so it runs after the window appears; the window waits here before its first query.
+#[tauri::command]
+async fn wait_catalog_ready(state: State<'_, AppState>) -> CmdResult<()> {
+    let ready = state.ready.clone();
+    blocking(move || {
+        let (lock, cv) = &*ready;
+        let mut done = lock.lock().unwrap_or_else(|e| e.into_inner());
+        while !*done {
+            done = cv.wait(done).unwrap_or_else(|e| e.into_inner());
+        }
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -90,6 +124,7 @@ async fn read_disk(
     })
     .await;
     reading.store(false, Ordering::SeqCst);
+    release_memory();
     result
 }
 
@@ -135,7 +170,9 @@ async fn rename_disk(state: State<'_, AppState>, disk_id: i64, name: String) -> 
 #[tauri::command]
 async fn delete_disk(state: State<'_, AppState>, disk_id: i64) -> CmdResult<()> {
     let mut s = open(&state)?;
-    blocking(move || s.delete_disk(disk_id).map_err(err)).await
+    let r = blocking(move || s.delete_disk(disk_id).map_err(err)).await;
+    release_memory();
+    r
 }
 
 #[tauri::command]
@@ -147,7 +184,9 @@ async fn export_disk(state: State<'_, AppState>, disk_id: i64, dest_path: String
 #[tauri::command]
 async fn import_disk(state: State<'_, AppState>, src_path: String) -> CmdResult<Disk> {
     let mut s = open(&state)?;
-    blocking(move || s.import_disk(src_path).map_err(err)).await
+    let r = blocking(move || s.import_disk(src_path).map_err(err)).await;
+    release_memory();
+    r
 }
 
 #[tauri::command]
@@ -426,8 +465,8 @@ fn prepare_catalog(path: &std::path::Path) -> Option<StartupNotice> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let catalog_path = hdf_core::db::default_catalog_path().expect("pasta Documentos não encontrada");
-    // Cria a pasta e o esquema já na abertura do app; se der errado, avisa na janela.
-    let notice = prepare_catalog(&catalog_path);
+    let ready: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)> = Arc::default();
+    let (prep_path, prep_ready) = (catalog_path.clone(), ready.clone());
     tauri::Builder::default()
         .setup(move |app| {
             use tauri::WebviewWindowBuilder;
@@ -436,19 +475,32 @@ pub fn run() {
             WebviewWindowBuilder::from_config(app.handle(), &cfg)?
                 .on_navigation(allow_navigation)
                 .build()?;
-            if let Some(n) = notice {
-                use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-                let handle = app.handle().clone();
-                app.dialog()
-                    .message(n.text)
-                    .title("HD Fantasma")
-                    .kind(if n.fatal { MessageDialogKind::Error } else { MessageDialogKind::Warning })
-                    .show(move |_| {
-                        if n.fatal {
-                            handle.exit(1);
-                        }
-                    });
-            }
+            // Cria a pasta e o esquema (ou converte um catálogo antigo) com a janela já aberta;
+            // se der errado, avisa na janela.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let notice = prepare_catalog(&prep_path);
+                release_memory();
+                {
+                    let (lock, cv) = &*prep_ready;
+                    *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+                    cv.notify_all();
+                }
+                if let Some(n) = notice {
+                    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                    let h = handle.clone();
+                    handle
+                        .dialog()
+                        .message(n.text)
+                        .title("HD Fantasma")
+                        .kind(if n.fatal { MessageDialogKind::Error } else { MessageDialogKind::Warning })
+                        .show(move |_| {
+                            if n.fatal {
+                                h.exit(1);
+                            }
+                        });
+                }
+            });
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
@@ -456,8 +508,10 @@ pub fn run() {
             catalog_path,
             cancel: Arc::new(AtomicBool::new(false)),
             reading: Arc::new(AtomicBool::new(false)),
+            ready,
         })
         .invoke_handler(tauri::generate_handler![
+            wait_catalog_ready,
             list_disks,
             list_mounted_volumes,
             read_disk,

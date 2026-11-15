@@ -1,6 +1,6 @@
 //! Busca, navegação, duplicados e caminho real de um item.
 
-use crate::db::{Catalog, ITEM_COLS, normalize, row_to_item};
+use crate::db::{Catalog, ITEM_COLS, ITEM_JOIN, normalize, row_to_item};
 use crate::error::{Error, Result};
 use crate::model::*;
 use rusqlite::types::Value;
@@ -14,6 +14,21 @@ fn like_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }
 
+/// "Contains this text" on the normalized name, answered by the trigram index (ADR 0018).
+/// GLOB is used when it can be (fastest); LIKE without ESCAPE when the text has GLOB characters;
+/// LIKE with ESCAPE only for the rare text that has both kinds (that one reads every name).
+fn contains_clause(t: &str) -> (String, String) {
+    let has_glob = t.contains(['*', '?', '[']);
+    let has_like = t.contains(['%', '_']);
+    if !has_glob {
+        ("f.name_norm GLOB ?".into(), format!("*{t}*"))
+    } else if !has_like {
+        ("f.name_norm LIKE ?".into(), format!("%{t}%"))
+    } else {
+        ("f.name_norm LIKE ? ESCAPE '\\'".into(), format!("%{}%", like_escape(t)))
+    }
+}
+
 struct Built {
     from: String,
     wher: String,
@@ -25,20 +40,11 @@ fn build(q: &SearchQuery) -> Built {
     let mut args: Vec<Value> = Vec::new();
     let norm = normalize(&q.text);
     let terms: Vec<&str> = norm.split_whitespace().collect();
-    let (long, short): (Vec<&str>, Vec<&str>) = terms.iter().partition(|t| t.chars().count() >= 3);
     let use_fts = !terms.is_empty();
-    if !long.is_empty() {
-        let m = long
-            .iter()
-            .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
-            .collect::<Vec<_>>()
-            .join(" AND ");
-        clauses.push("f.name_norm MATCH ?".into());
-        args.push(Value::Text(m));
-    }
-    for t in short {
-        clauses.push("f.name_norm LIKE ? ESCAPE '\\'".into());
-        args.push(Value::Text(format!("%{}%", like_escape(t))));
+    for t in &terms {
+        let (clause, arg) = contains_clause(t);
+        clauses.push(clause);
+        args.push(Value::Text(arg));
     }
     if !q.kinds.is_empty() {
         let ph = vec!["?"; q.kinds.len()].join(",");
@@ -54,11 +60,11 @@ fn build(q: &SearchQuery) -> Built {
         args.push(Value::Integer(v as i64));
     }
     if let Some(d) = q.modified_after.as_ref().filter(|s| !s.is_empty()) {
-        clauses.push("substr(i.modified_at,1,10) >= ?".into());
+        clauses.push("i.modified_at >= CAST(strftime('%s', ?) AS INTEGER)".into());
         args.push(Value::Text(d.chars().take(10).collect()));
     }
     if let Some(d) = q.modified_before.as_ref().filter(|s| !s.is_empty()) {
-        clauses.push("substr(i.modified_at,1,10) <= ?".into());
+        clauses.push("i.modified_at < CAST(strftime('%s', ?, '+1 day') AS INTEGER)".into());
         args.push(Value::Text(d.chars().take(10).collect()));
     }
     if !q.disk_ids.is_empty() {
@@ -88,7 +94,7 @@ impl Catalog {
         )?;
         let limit = if q.limit == 0 { 500 } else { q.limit.min(MAX_LIMIT) };
         let sql = format!(
-            "SELECT {ITEM_COLS} FROM {} {} ORDER BY i.name COLLATE NOCASE, i.id LIMIT {} OFFSET {}",
+            "SELECT {ITEM_COLS} FROM {} {ITEM_JOIN} {} ORDER BY i.name COLLATE NOCASE, i.id LIMIT {} OFFSET {}",
             b.from, b.wher, limit, q.offset
         );
         let mut st = self.conn.prepare(&sql)?;
@@ -101,7 +107,7 @@ impl Catalog {
     /// Filhos diretos: pastas primeiro, depois por nome (sem diferenciar maiúsculas).
     pub fn list_children(&self, disk_id: i64, parent_id: Option<i64>) -> Result<Vec<Item>> {
         let mut st = self.conn.prepare_cached(&format!(
-            "SELECT {ITEM_COLS} FROM items i WHERE i.disk_id=?1 AND i.parent_id IS ?2
+            "SELECT {ITEM_COLS} FROM items i {ITEM_JOIN} WHERE i.disk_id=?1 AND i.parent_id IS ?2
              ORDER BY (i.kind != 'folder'), i.name COLLATE NOCASE, i.id"
         ))?;
         let v = st
@@ -124,7 +130,7 @@ impl Catalog {
             |r| r.get(0),
         )?;
         let mut st = self.conn.prepare_cached(&format!(
-            "SELECT {ITEM_COLS} FROM items i WHERE i.disk_id=?1 AND i.parent_id IS ?2
+            "SELECT {ITEM_COLS} FROM items i {ITEM_JOIN} WHERE i.disk_id=?1 AND i.parent_id IS ?2
              ORDER BY (i.kind != 'folder'), i.name COLLATE NOCASE, i.id LIMIT ?3 OFFSET ?4"
         ))?;
         let v = st
@@ -136,7 +142,7 @@ impl Catalog {
     /// Children of a folder with exactly this name (usually one).
     pub fn find_child_named(&self, disk_id: i64, parent_id: Option<i64>, name: &str) -> Result<Vec<Item>> {
         let mut st = self.conn.prepare_cached(&format!(
-            "SELECT {ITEM_COLS} FROM items i WHERE i.disk_id=?1 AND i.parent_id IS ?2 AND i.name=?3 LIMIT 10"
+            "SELECT {ITEM_COLS} FROM items i {ITEM_JOIN} WHERE i.disk_id=?1 AND i.parent_id IS ?2 AND i.name=?3 LIMIT 10"
         ))?;
         let v = st
             .query_map(params![disk_id, parent_id, name], row_to_item)?
@@ -147,7 +153,7 @@ impl Catalog {
     pub fn get_item(&self, id: i64) -> Result<Item> {
         self.conn
             .query_row(
-                &format!("SELECT {ITEM_COLS} FROM items i WHERE i.id=?1"),
+                &format!("SELECT {ITEM_COLS} FROM items i {ITEM_JOIN} WHERE i.id=?1"),
                 [id],
                 row_to_item,
             )
@@ -166,9 +172,9 @@ impl Catalog {
             format!("AND disk_id IN ({})", vec!["?"; disk_ids.len()].join(","))
         };
         let sql = format!(
-            "SELECT name, size_bytes FROM items
+            "SELECT name, size_bytes FROM items INDEXED BY idx_items_size
              WHERE kind != 'folder' AND size_bytes >= ?1 {disk_clause}
-             GROUP BY name, size_bytes HAVING COUNT(*) > 1
+             GROUP BY size_bytes, name HAVING COUNT(*) > 1
              ORDER BY size_bytes DESC, name COLLATE NOCASE LIMIT {MAX_DUP_GROUPS}"
         );
         let mut st = self.conn.prepare(&sql)?;
@@ -177,9 +183,9 @@ impl Catalog {
             .collect::<rusqlite::Result<_>>()?;
 
         let item_sql = format!(
-            "SELECT {ITEM_COLS} FROM items i
-             WHERE i.name=?1 AND i.size_bytes=?2 AND i.kind != 'folder' {}
-             ORDER BY i.disk_id, i.path",
+            "SELECT {ITEM_COLS} FROM items i {ITEM_JOIN}
+             WHERE i.size_bytes=?2 AND i.name=?1 AND i.kind != 'folder' {}
+             ORDER BY i.disk_id, 5",
             if disk_ids.is_empty() {
                 String::new()
             } else {

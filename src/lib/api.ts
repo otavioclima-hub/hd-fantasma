@@ -20,6 +20,7 @@ async function call<T>(cmd: string, args: Record<string, unknown> | undefined, f
 }
 
 const m = mock;
+export const waitCatalogReady = () => call<void>("wait_catalog_ready", undefined, () => m.wait_catalog_ready());
 export const listDisks = () => call<Disk[]>("list_disks", undefined, () => m.list_disks());
 export const listMountedVolumes = () => call<MountedVolume[]>("list_mounted_volumes", undefined, () => m.list_mounted_volumes());
 export const readDisk = (mountPath: string, options: ReadOptions) =>

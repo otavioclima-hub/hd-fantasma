@@ -1,6 +1,7 @@
 // Every command the window may call is listed here and allowed one by one in
 // capabilities/default.json (audit 2026-11-14): a command that is not listed cannot be called.
 const COMMANDS: &[&str] = &[
+    "wait_catalog_ready",
     "list_disks",
     "list_mounted_volumes",
     "read_disk",

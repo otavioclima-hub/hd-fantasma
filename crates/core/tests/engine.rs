@@ -343,7 +343,7 @@ fn v1_catalog_is_migrated() {
         .unwrap();
     assert_eq!(cols, 0);
     let v: i64 = c.query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 3);
+    assert_eq!(v, hdf_core::db::SCHEMA_VERSION);
     // v3: a coluna nova existe e foi calculada (pacote.zip tem 1 filho no catálogo antigo, que sumiu).
     let dc: i64 = c.query_row("SELECT COUNT(*) FROM pragma_table_info('items') WHERE name='descendant_count'", [], |r| r.get(0)).unwrap();
     assert_eq!(dc, 1);
@@ -463,7 +463,12 @@ fn reference(dir: &Path, rel: &str, out: &mut BTreeMap<String, (String, u64, u64
 fn catalog_rows(path: &Path) -> (BTreeMap<String, (String, u64, u64)>, i64, i64) {
     let c = rusqlite::Connection::open(path).unwrap();
     let mut st = c
-        .prepare("SELECT i.path, i.kind, i.size_bytes, i.child_count, p.path, i.parent_id FROM items i LEFT JOIN items p ON p.id=i.parent_id")
+        // Files store no path (ADR 0018): the catalog rebuilds it from the parent folder.
+        .prepare(
+            "SELECT CASE WHEN i.path IS NOT NULL THEN i.path WHEN p.path IS NULL THEN i.name ELSE p.path || '/' || i.name END,
+                    i.kind, i.size_bytes, i.child_count, p.path, i.parent_id
+             FROM items i LEFT JOIN items p ON p.id=i.parent_id",
+        )
         .unwrap();
     let mut m = BTreeMap::new();
     let rows = st

@@ -93,6 +93,11 @@ export const searchActive = () =>
 
 // ---------- início ----------
 export async function init() {
+  // A catalog from an older version is converted once at startup (a few seconds for big ones).
+  const slow = setTimeout(() => (S.busy = tr("busy.upgrading")), 300);
+  try { await api.waitCatalogReady(); } catch (e) { fail(e); }
+  clearTimeout(slow);
+  S.busy = "";
   try {
     S.settings = await api.getSettings();
     lang.set(S.settings.language);
