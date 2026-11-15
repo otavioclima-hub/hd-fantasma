@@ -60,11 +60,12 @@ jobs:
       - name: Interface check
         run: npm run check
 
-      - name: Tests (engine, MCP, app)
-        run: cargo test --locked --workspace
-
+      # The app's build checks that the bundled MCP exists, so it is built before the tests.
       - name: MCP sidecar
         run: scripts/build-mcp-sidecar.sh
+
+      - name: Tests (engine, MCP, app)
+        run: cargo test --locked --workspace
 
       - name: App and installer (NSIS)
         run: npm run tauri build -- --bundles nsis -- --locked
