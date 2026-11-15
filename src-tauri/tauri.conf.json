@@ -44,6 +44,18 @@
     ],
     "resources": {
       "../THIRD_PARTY_LICENSES.md": "THIRD_PARTY_LICENSES.md"
-    }
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "PortugueseBR",
+          "English"
+        ],
+        "displayLanguageSelector": false
+      }
+    },
+    "publisher": "Otavio Lima",
+    "shortDescription": "Catálogo de discos para pesquisar sem plugar"
   }
 }

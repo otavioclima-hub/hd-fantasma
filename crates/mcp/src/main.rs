@@ -15,7 +15,7 @@ fn main() {
                 }
             },
             "--help" | "-h" => {
-                println!("hd-fantasma-mcp [--catalog <arquivo.sqlite>]\nServidor MCP do HD Fantasma (stdio). Sem --catalog usa Documentos/HD Fantasma/catalogo.sqlite.");
+                println!("hd-fantasma-mcp [--catalog <arquivo.sqlite>]\nServidor MCP do HD Fantasma (stdio). Sem --catalog usa o catálogo do app (Mac: Documentos/HD Fantasma/catalogo.sqlite; Windows: %LOCALAPPDATA%\\HD Fantasma\\catalogo.sqlite).");
                 return;
             }
             "--version" | "-V" => {

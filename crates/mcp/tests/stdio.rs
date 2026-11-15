@@ -312,6 +312,16 @@ fn catalogar_e_plugados() {
         let internal = r["discos"].as_array().unwrap().iter().find(|d| d["caminhoMontagem"] == "/").unwrap();
         assert_eq!(internal["podeCatalogar"], false);
     }
+    if cfg!(windows) {
+        let sys = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+        assert!(r["total"].as_u64().unwrap() >= 1);
+        assert!(c.fail("catalogar_disco", json!({"disco": format!("{sys}\\")})).contains("disco interno"));
+        assert!(c.fail("catalogar_disco", json!({"disco": sys})).contains("disco interno"));
+        let internal = r["discos"].as_array().unwrap().iter()
+            .find(|d| d["caminhoMontagem"].as_str().is_some_and(|m| m.eq_ignore_ascii_case(&format!("{sys}\\"))))
+            .unwrap();
+        assert_eq!(internal["podeCatalogar"], false);
+    }
     // nada foi gravado
     assert_eq!(c.ok("listar_discos", json!({}))["totalDiscos"], 2);
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Compila o MCP (hd-fantasma-mcp) em release e põe em src-tauri/binaries/ com o nome que o
 # Tauri exige para "externalBin": hd-fantasma-mcp-<target-triple>.
-# Rode ANTES de `npm run tauri build` (e de `tauri dev`: o Tauri confere se o arquivo existe).
+# Funciona no macOS e no Windows (Git Bash). Rode ANTES de `npm run tauri build` (e de `tauri dev`: o Tauri confere se o arquivo existe).
 #
 # Uso:
 #   scripts/build-mcp-sidecar.sh              # só para este Mac (aarch64 ou x86_64)
@@ -34,8 +34,10 @@ if [[ "${1:-}" == "--universal" ]]; then
     "target/aarch64-apple-darwin/release/$BIN" "target/x86_64-apple-darwin/release/$BIN"
   lipo -info "$OUT/$BIN-universal-apple-darwin"
 else
+  EXT=""
+  [[ "$HOST" == *windows* ]] && EXT=".exe"
   build_for "$HOST"
-  cp "target/$HOST/release/$BIN" "$OUT/$BIN-$HOST"
+  cp "target/$HOST/release/$BIN$EXT" "$OUT/$BIN-$HOST$EXT"
 fi
 
 chmod +x "$OUT"/$BIN-*

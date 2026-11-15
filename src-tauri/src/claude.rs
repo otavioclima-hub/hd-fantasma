@@ -14,7 +14,10 @@ pub const SERVER_NAME: &str = "hd-fantasma";
 const CLI_TIMEOUT: Duration = Duration::from_secs(15);
 const MSG_BAD_JSON: &str = "O arquivo de configuração do Claude está com erro; não mexi nele.";
 const MSG_WRITE: &str = "Não consegui gravar a configuração do Claude.";
+#[cfg(not(windows))]
 const MSG_NOT_INSTALLED: &str = "Antes de conectar, arraste o HD Fantasma para a pasta Aplicativos e abra ele de lá.";
+#[cfg(windows)]
+const MSG_NOT_INSTALLED: &str = "Antes de conectar, instale o HD Fantasma pelo instalador e abra ele pelo menu Iniciar.";
 
 /// The Claude apps will run whatever sits at the registered path, every time they start. So the
 /// path must be a real install: not the mounted installer image or any other removable disk
@@ -24,6 +27,17 @@ fn stable_install(mcp: &Path) -> Result<(), String> {
     let p = mcp.to_string_lossy();
     if p.starts_with("/Volumes/") || p.contains("/AppTranslocation/") {
         return Err(MSG_NOT_INSTALLED.into());
+    }
+    // Windows: not a temporary folder (opened straight from a zip) and not a removable disk.
+    #[cfg(windows)]
+    {
+        let low = p.to_lowercase().replace('/', "\\");
+        let temp = std::env::temp_dir().to_string_lossy().to_lowercase();
+        if (!temp.is_empty() && low.starts_with(temp.trim_end_matches('\\'))) || low.contains("\\temp\\")
+            || !hdf_core::volumes::is_internal_volume(mcp)
+        {
+            return Err(MSG_NOT_INSTALLED.into());
+        }
     }
     Ok(())
 }
@@ -56,6 +70,9 @@ pub struct ClaudeStatus {
 pub struct Ctx {
     pub home: PathBuf,
     pub appdata: Option<PathBuf>,
+    /// Windows `%LOCALAPPDATA%` (Claude Desktop installed from the Microsoft Store keeps its
+    /// configuration under `Packages` there).
+    pub localappdata: Option<PathBuf>,
     pub mcp: PathBuf,
 }
 
@@ -67,18 +84,37 @@ impl Ctx {
         Ok(Ctx {
             home: dirs::home_dir().unwrap_or_default(),
             appdata: std::env::var_os("APPDATA").map(PathBuf::from),
+            localappdata: std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
             mcp: dir.join(name),
         })
     }
 
     fn desktop_dir(&self) -> PathBuf {
         if cfg!(windows) {
+            // Microsoft Store / MSIX install: the app sees a private copy of AppData\\Roaming.
+            if let Some(d) = self.store_desktop_dir() {
+                return d;
+            }
             self.appdata.clone().unwrap_or_else(|| self.home.join("AppData/Roaming")).join("Claude")
         } else if cfg!(target_os = "macos") {
             self.home.join("Library/Application Support/Claude")
         } else {
             self.home.join(".config/Claude")
         }
+    }
+
+    /// `%LOCALAPPDATA%\\Packages\\Claude_<id>\\LocalCache\\Roaming\\Claude`, when it exists.
+    fn store_desktop_dir(&self) -> Option<PathBuf> {
+        let pk = self.localappdata.clone().unwrap_or_else(|| self.home.join("AppData/Local")).join("Packages");
+        let mut found: Vec<PathBuf> = std::fs::read_dir(pk)
+            .ok()?
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().to_lowercase().starts_with("claude_"))
+            .map(|e| e.path().join("LocalCache").join("Roaming").join("Claude"))
+            .filter(|p| p.is_dir())
+            .collect();
+        found.sort();
+        found.into_iter().next()
     }
 
     pub fn desktop_config(&self) -> PathBuf {
@@ -195,6 +231,8 @@ pub fn find_claude(ctx: &Ctx) -> Option<PathBuf> {
     let h = &ctx.home;
     let mut cands: Vec<PathBuf> = Vec::new();
     if cfg!(windows) {
+        // Native installer, then npm.
+        cands.push(h.join(".local").join("bin").join("claude.exe"));
         let ad = ctx.appdata.clone().unwrap_or_else(|| h.join("AppData/Roaming"));
         cands.push(ad.join("npm").join("claude.cmd"));
     } else {
@@ -354,7 +392,12 @@ fn status_with(ctx: &Ctx, timeout: Duration) -> ClaudeStatus {
         code: CodeStatus {
             cli_found: claude.is_some(),
             connected: claude.as_deref().map(|c| code_connected_with(c, ctx, timeout)).unwrap_or(false),
-            command: format!("claude mcp add --scope user {SERVER_NAME} -- \"{mcp}\""),
+            // PowerShell may drop a bare `--`, and the path has no options, so Windows goes without it.
+            command: if cfg!(windows) {
+                format!("claude mcp add --scope user {SERVER_NAME} \"{mcp}\"")
+            } else {
+                format!("claude mcp add --scope user {SERVER_NAME} -- \"{mcp}\"")
+            },
         },
         mcp_path: mcp,
     }
@@ -534,12 +577,31 @@ mod tests {
             "/Volumes/HD Fantasma/HD Fantasma.app/Contents/MacOS/hd-fantasma-mcp",
             "/private/var/folders/ab/T/AppTranslocation/1234/d/HD Fantasma.app/Contents/MacOS/hd-fantasma-mcp",
         ] {
-            let ctx = Ctx { home: d.path().to_path_buf(), appdata: None, mcp: PathBuf::from(bad) };
+            let ctx = Ctx { home: d.path().to_path_buf(), appdata: None, localappdata: None, mcp: PathBuf::from(bad) };
             assert_eq!(connect_with(&ctx, None, Duration::from_secs(5)).unwrap_err(), MSG_NOT_INSTALLED);
             assert!(!ctx.desktop_config().exists(), "gravou a configuração para {bad}");
             // desconectar continua funcionando de qualquer lugar
             assert!(disconnect_with(&ctx, None, Duration::from_secs(5)).is_ok());
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_finds_the_store_install_config() {
+        let d = TempDir::new().unwrap();
+        let ctx = Ctx {
+            home: d.path().to_path_buf(),
+            appdata: Some(d.path().join("Roaming")),
+            localappdata: Some(d.path().join("Local")),
+            mcp: PathBuf::from(r"C:\Users\x\AppData\Local\HD Fantasma\hd-fantasma-mcp.exe"),
+        };
+        assert_eq!(ctx.desktop_config(), d.path().join("Roaming").join("Claude").join("claude_desktop_config.json"));
+        let store = d.path().join("Local/Packages/Claude_pzs8sxrjxfjjc/LocalCache/Roaming/Claude");
+        std::fs::create_dir_all(&store).unwrap();
+        assert_eq!(ctx.desktop_config(), store.join("claude_desktop_config.json"));
+        assert!(stable_install(&ctx.mcp).is_ok());
+        let tmp = std::env::temp_dir().join("x").join("hd-fantasma-mcp.exe");
+        assert_eq!(stable_install(&tmp).unwrap_err(), MSG_NOT_INSTALLED);
     }
 
     #[cfg(unix)]
@@ -578,7 +640,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         fn ctx(d: &TempDir) -> Ctx {
-            Ctx { home: d.path().to_path_buf(), appdata: None, mcp: PathBuf::from(MCP) }
+            Ctx { home: d.path().to_path_buf(), appdata: None, localappdata: None, mcp: PathBuf::from(MCP) }
         }
 
         /// `claude` falso: guarda o "comando registrado" em um arquivo ao lado dele.

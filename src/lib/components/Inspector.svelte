@@ -17,6 +17,10 @@
   const sizeFull = (n: number) => $t("insp.sizeValue", { bytes: formatNumber(n, $locale), human: formatBytes(n, $locale, true) });
   const fullPath = (i: Item) => {
     const d = diskById(i.diskId);
+    if (isWin) {
+      const rel = i.path.replaceAll("/", "\\");
+      return d?.present && d.mountPath ? `${d.mountPath.replace(/\\$/, "")}\\${rel}` : `${d?.name ?? ""}\\${rel}`;
+    }
     return d?.present && d.mountPath ? `${d.mountPath.replace(/\/$/, "")}/${i.path}` : `${d?.name ?? ""}/${i.path}`;
   };
 

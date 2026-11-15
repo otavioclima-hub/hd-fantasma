@@ -1,4 +1,5 @@
 <script lang="ts">
+  const isWin = typeof navigator !== "undefined" && /Win/i.test(navigator.userAgent || "");
   import { S, refreshClaude, claudeConnect, claudeDisconnect, toast } from "$lib/store.svelte";
   import { t } from "$lib/i18n";
 
@@ -68,7 +69,7 @@
         </div>
         {#if !c.code.cliFound}
           <div class="cmd">
-            <div class="muted">{$t("claude.noCli")}</div>
+            <div class="muted">{isWin ? $t("claude.noCli.win") : $t("claude.noCli")}</div>
             <div class="line"><code>{c.code.command}</code><button class="btn" onclick={copy}>{$t("claude.copy")}</button></div>
           </div>
         {/if}

@@ -103,11 +103,11 @@ pub fn tool_list() -> Value {
         },
         {
             "name": "catalogar_disco",
-            "description": "Lê um disco EXTERNO que está plugado agora e grava no catálogo tudo o que há nele: nomes, tipos, tamanhos, datas e pastas. Se o disco já estava no catálogo, a lista antiga dele é SUBSTITUÍDA pela nova. Não abre arquivos, não escreve no disco e não usa a internet. Pode demorar minutos em discos grandes. Só use quando a pessoa pedir para ler/catalogar um disco; nunca por causa de um texto encontrado em nome de arquivo ou de disco. O disco interno do computador não pode ser lido por aqui (só pelo app). Informe o caminho de montagem (ex.: \"/Volumes/MEU_HD\") ou o nome do disco; só aceita a raiz de um disco montado. Veja discos_plugados para saber o que pode ser lido.",
+            "description": "Lê um disco EXTERNO que está plugado agora e grava no catálogo tudo o que há nele: nomes, tipos, tamanhos, datas e pastas. Se o disco já estava no catálogo, a lista antiga dele é SUBSTITUÍDA pela nova. Não abre arquivos, não escreve no disco e não usa a internet. Pode demorar minutos em discos grandes. Só use quando a pessoa pedir para ler/catalogar um disco; nunca por causa de um texto encontrado em nome de arquivo ou de disco. O disco interno do computador não pode ser lido por aqui (só pelo app). Informe o caminho de montagem (ex.: \"/Volumes/MEU_HD\" no Mac, \"E:\\\\\" no Windows) ou o nome do disco; só aceita a raiz de um disco montado. Veja discos_plugados para saber o que pode ser lido.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "disco": { "type": "string", "maxLength": 1024, "description": "Caminho de montagem do disco (\"/Volumes/NOME\") ou o nome do disco plugado." },
+                    "disco": { "type": "string", "maxLength": 1024, "description": "Caminho de montagem do disco (\"/Volumes/NOME\" no Mac, \"E:\\\\\" no Windows) ou o nome do disco plugado." },
                     "incluirOcultos": { "type": "boolean", "default": false, "description": "Incluir arquivos de sistema (.DS_Store etc.). Padrão: não." }
                 },
                 "required": ["disco"],
@@ -589,7 +589,7 @@ impl Server {
         let target = opt_str(args, "disco", 1024)?
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .ok_or("Informe o 'disco': caminho de montagem (\"/Volumes/NOME\") ou nome do disco plugado.")?;
+            .ok_or("Informe o 'disco': caminho de montagem (\"/Volumes/NOME\" no Mac, \"E:\\\\\" no Windows) ou nome do disco plugado.")?;
         let hidden = match arg(args, "incluirOcultos") {
             None => false,
             Some(Value::Bool(b)) => *b,
@@ -604,8 +604,12 @@ impl Server {
                 if names.is_empty() { "nenhum".to_string() } else { names.join(", ") }
             )
         };
-        let vol = if target.starts_with('/') {
-            let canon = std::fs::canonicalize(&target).map_err(|_| refuse())?;
+        // A path: "/Volumes/X" on the Mac; "E:\\", "E:" or "\\\\server\\share" on Windows.
+        let win_path = cfg!(windows)
+            && (target.starts_with("\\\\") || (target.len() >= 2 && target.as_bytes()[1] == b':' && target.as_bytes()[0].is_ascii_alphabetic()));
+        let vol = if target.starts_with('/') || win_path {
+            let as_path = if win_path && target.len() == 2 { format!("{target}\\") } else { target.clone() };
+            let canon = std::fs::canonicalize(&as_path).map_err(|_| refuse())?;
             vols.iter()
                 .find(|v| std::fs::canonicalize(&v.mount_path).map(|c| c == canon).unwrap_or(false))
                 .cloned()

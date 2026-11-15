@@ -218,7 +218,11 @@ impl Catalog {
         if !rel.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
             return Err(Error::msg("O caminho deste item no catálogo não é válido."));
         }
-        let p = PathBuf::from(&vol.mount_path).join(rel);
+        // One component at a time, so Windows gets `D:\\a\\b` (the catalog always uses `/`).
+        let mut p = PathBuf::from(&vol.mount_path);
+        for c in rel.components() {
+            p.push(c);
+        }
         if !p.exists() {
             return Err(Error::msg("O arquivo não existe mais no disco (o catálogo pode estar desatualizado)."));
         }

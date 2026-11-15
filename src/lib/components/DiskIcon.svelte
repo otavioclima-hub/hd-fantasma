@@ -1,6 +1,6 @@
 <script lang="ts">
   let { fs, size = 26 }: { fs: string; size?: number } = $props();
-  const net = $derived(["smbfs", "nfs", "afpfs", "cifs", "webdav"].includes(fs.toLowerCase()));
+  const net = $derived(["smbfs", "smb", "nfs", "afpfs", "cifs", "webdav"].includes(fs.toLowerCase()));
   const internal = $derived(["apfs", "hfs"].includes(fs.toLowerCase()));
 </script>
 

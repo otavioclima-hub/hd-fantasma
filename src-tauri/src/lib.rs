@@ -212,8 +212,13 @@ fn reveal(path: &std::path::Path) -> CmdResult<()> {
 
 #[cfg(windows)]
 fn reveal(path: &std::path::Path) -> CmdResult<()> {
+    use std::os::windows::process::CommandExt;
+    // Explorer wants `/select,"C:\\path with spaces"` exactly; quotes inside a name are impossible
+    // on Windows, so the quoted path cannot break out of the argument.
+    let p = path.to_string_lossy().replace('/', "\\");
+    let p = p.strip_prefix(r"\\?\").unwrap_or(&p).to_string();
     std::process::Command::new("explorer")
-        .arg(format!("/select,{}", path.display()))
+        .raw_arg(format!("/select,\"{p}\""))
         .spawn()
         .map(|_| ())
         .map_err(|_| "Não foi possível abrir o Explorer.".to_string())

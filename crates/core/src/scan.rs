@@ -42,6 +42,11 @@ const IGNORED: &[&str] = &[
     "System Volume Information",
     "Thumbs.db",
     "desktop.ini",
+    // Windows memory files at the root of the system drive.
+    "pagefile.sys",
+    "hiberfil.sys",
+    "swapfile.sys",
+    "DumpStack.log.tmp",
 ];
 
 /// Pastas na raiz de "/" que são só do sistema (ou ruído).
@@ -49,6 +54,38 @@ const ROOT_SYSTEM_DIRS: &[&str] = &[
     "System", "dev", "Volumes", "cores", ".vol", "private", "bin", "sbin", "usr", "etc", "var",
     "tmp", ".Spotlight-V100", ".fseventsd", ".DocumentRevisions-V100", ".PKInstallSandboxManager",
 ];
+
+/// Folders at the root of the Windows system drive that belong to Windows itself or to installed
+/// programs (compared ignoring case). The person's files are in `Users` and other folders.
+const WIN_ROOT_SYSTEM_DIRS: &[&str] = &[
+    "Windows", "Program Files", "Program Files (x86)", "ProgramData", "Recovery", "PerfLogs",
+    "$WinREAgent", "$SysReset", "$Windows.~BT", "$Windows.~WS", "$GetCurrent", "Config.Msi",
+    "OneDriveTemp", "MSOCache", "Documents and Settings",
+];
+
+/// `rel` is a system folder at the root of the internal system disk.
+fn is_root_system_dir(rel: &str) -> bool {
+    if cfg!(windows) {
+        WIN_ROOT_SYSTEM_DIRS.iter().any(|d| d.eq_ignore_ascii_case(rel))
+    } else {
+        ROOT_SYSTEM_DIRS.contains(&rel)
+    }
+}
+
+/// The root being read is the disk the system runs from ("/" on the Mac, `C:\` on Windows).
+fn is_system_root(root: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let sys = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+        let r = root.to_string_lossy();
+        let r = r.strip_prefix(r"\\?\").unwrap_or(&r).trim_end_matches(['\\', '/']).to_string();
+        r.eq_ignore_ascii_case(sys.trim_end_matches('\\'))
+    }
+    #[cfg(not(windows))]
+    {
+        root == Path::new("/")
+    }
+}
 
 /// Other apps' private data on the internal Mac disk (`Users/<name>/Library/Containers` and
 /// `.../Group Containers`). macOS asks "would like to access data from other apps" once per app
@@ -100,7 +137,15 @@ pub fn iso_from_unix(secs: i64) -> String {
 
 /// O caminho está numa pasta de nuvem (leitura lenta, que espera a rede).
 fn is_cloud_path(p: &str) -> bool {
-    p.contains("/Library/CloudStorage/") || p.contains("/Library/Mobile Documents/")
+    if p.contains("/Library/CloudStorage/") || p.contains("/Library/Mobile Documents/") {
+        return true;
+    }
+    // Windows: OneDrive ("OneDrive", "OneDrive - Company"), Dropbox and iCloud folders in the
+    // person's folder. Only used to prune cloud folders that end up empty.
+    cfg!(windows) && {
+        let p = p.replace('\\', "/");
+        p.contains("/OneDrive/") || p.contains("/OneDrive - ") || p.contains("/Dropbox/") || p.contains("/iCloudDrive/")
+    }
 }
 
 /// Caminho relativo `rel` (dentro de `root`) está numa pasta de nuvem?
@@ -160,7 +205,7 @@ impl Shared<'_> {
     }
 
     fn skip_dir(&self, rel: &str, dev: Option<u64>) -> bool {
-        if self.is_slash && (ROOT_SYSTEM_DIRS.contains(&rel) || is_other_apps_data(rel)) {
+        if self.is_slash && (is_root_system_dir(rel) || is_other_apps_data(rel)) {
             return true;
         }
         // Não atravessa para outro volume montado.
@@ -663,7 +708,7 @@ fn read_disk_inner(
         return Err(Error::msg("O disco não está plugado."));
     }
     let root_md = std::fs::metadata(&root)?;
-    let is_slash = root == Path::new("/");
+    let is_slash = is_system_root(&root);
     let mut allowed_devs: Vec<u64> = fastdir::md_dev(&root_md).into_iter().collect();
     if is_slash {
         // No macOS os arquivos do usuário ficam no volume "Data", ligado a "/" por firmlinks.
@@ -826,7 +871,12 @@ mod tests {
         assert!(!sh.skip_dir("a", None));
         let mut slash = shared(&cancel, &next, vec![10]);
         slash.is_slash = true;
-        assert!(slash.skip_dir("Volumes", Some(10)));
+        if cfg!(windows) {
+            assert!(slash.skip_dir("Windows", Some(10)));
+            assert!(slash.skip_dir("program files", Some(10)), "case is ignored on Windows");
+        } else {
+            assert!(slash.skip_dir("Volumes", Some(10)));
+        }
         assert!(!slash.skip_dir("Users", Some(10)));
     }
 
@@ -931,6 +981,17 @@ mod tests {
         assert!(is_cloud_rel("/", "Users/x/Library/Mobile Documents/c"));
         assert!(!is_cloud_rel("/Users/x/Library", "Caches/a"));
         assert!(!is_cloud_rel("/Volumes/HD", "Projetos"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_system_drive_and_cloud_folders() {
+        let sys = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+        assert!(is_system_root(Path::new(&format!("{sys}\\"))));
+        assert!(!is_system_root(Path::new("Z:\\")));
+        assert!(is_cloud_rel("C:\\", "Users/x/OneDrive/Fotos"));
+        assert!(is_cloud_rel("C:\\", "Users/x/OneDrive - Empresa/a"));
+        assert!(!is_cloud_rel("D:\\", "Projetos"));
     }
 
     #[test]

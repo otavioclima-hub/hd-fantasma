@@ -1,4 +1,5 @@
 <script lang="ts">
+  const isWin = typeof navigator !== "undefined" && /Win/i.test(navigator.userAgent || "");
   import { S, startRead } from "$lib/store.svelte";
   import { t, locale } from "$lib/i18n";
   import { formatBytes } from "$lib/format";
@@ -50,6 +51,7 @@
       </div>
 
       <label class="opt chk"><input type="checkbox" bind:checked={hidden} /> {$t("sheet.hidden")}</label>
+      {#if isWin}<p class="muted small">{$t("sheet.macDisks.win")}</p>{/if}
     </div>
     <footer>
       <button class="btn" onclick={() => (S.sheetOpen = false)}>{$t("cancel")}</button>

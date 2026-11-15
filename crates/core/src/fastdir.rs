@@ -177,7 +177,24 @@ fn md_flags(md: &std::fs::Metadata) -> u32 {
     use std::os::macos::fs::MetadataExt;
     md.st_flags()
 }
-#[cfg(not(target_os = "macos"))]
+/// Windows (OneDrive, Dropbox and other cloud-files providers): an "online-only" file has
+/// RECALL_ON_DATA_ACCESS (or the older OFFLINE) attribute; a folder whose list of contents was
+/// never downloaded has RECALL_ON_OPEN. Both mean "only in the cloud" (ADR 0014). The
+/// attributes come with the folder listing itself, so nothing is opened or downloaded.
+#[cfg(windows)]
+fn md_flags(md: &std::fs::Metadata) -> u32 {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
+    const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
+    const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+    let a = md.file_attributes();
+    if a & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) != 0 {
+        SF_DATALESS
+    } else {
+        0
+    }
+}
+#[cfg(not(any(target_os = "macos", windows)))]
 fn md_flags(_md: &std::fs::Metadata) -> u32 {
     0
 }
@@ -478,7 +495,9 @@ mod tests {
         assert!(fast.entries.iter().find(|e| e.name == "a.txt").unwrap().alloc >= 1234);
         assert!(!fast.entries.iter().any(|e| e.name.starts_with("link")), "links são ignorados");
         let dir = fast.entries.iter().find(|e| e.name == "pasta").unwrap();
-        assert!(dir.is_dir && dir.dev.is_some());
+        assert!(dir.is_dir);
+        // Windows has no device id here (junctions and mount folders are skipped as links).
+        assert_eq!(dir.dev.is_some(), cfg!(unix));
         assert!(list_dir(&p.join("nao-existe")).is_none());
     }
 }

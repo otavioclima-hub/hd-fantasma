@@ -117,11 +117,15 @@ pub fn now_iso() -> String {
     )
 }
 
-/// `<Documentos>/HD Fantasma/catalogo.sqlite`
+/// Mac: `<Documentos>/HD Fantasma/catalogo.sqlite`.
+/// Windows: `%LOCALAPPDATA%\\HD Fantasma\\catalogo.sqlite` (ADR 0019): Documents is often inside
+/// OneDrive there, and a database being synced (or turned "online-only") can break.
 pub fn default_catalog_path() -> Result<PathBuf> {
-    let docs = dirs::document_dir()
-        .ok_or_else(|| Error::msg("Não foi possível achar a pasta Documentos."))?;
-    Ok(docs.join("HD Fantasma").join("catalogo.sqlite"))
+    #[cfg(windows)]
+    let base = dirs::data_local_dir().ok_or_else(|| Error::msg("Não foi possível achar a pasta de dados do Windows."))?;
+    #[cfg(not(windows))]
+    let base = dirs::document_dir().ok_or_else(|| Error::msg("Não foi possível achar a pasta Documentos."))?;
+    Ok(base.join("HD Fantasma").join("catalogo.sqlite"))
 }
 
 /// The catalog was written by a newer HD Fantasma: never touch it (an older app could break it).
