@@ -33,7 +33,7 @@ O **HD Fantasma** faz uma lista de tudo o que existe em cada disco (nomes, taman
 - **Nunca abre os seus arquivos.** Só lê o que o sistema informa: nome, tamanho, datas e pastas. Não olha dentro de vídeos, fotos ou arquivos .zip.
 - **Nunca usa a internet.** Não envia nada para ninguém, não tem conta e nem checa atualização sozinho.
 - **Nunca escreve nos seus discos.** Ele só lê. O catálogo fica no seu computador.
-- **Pastas de nuvem (Google Drive, Dropbox, iCloud):** entra só o que já está baixado no Mac. Ele nunca baixa nada da nuvem.
+- **Pastas de nuvem (Google Drive, Dropbox, iCloud, OneDrive):** entra só o que já está baixado no computador. Ele nunca baixa nada da nuvem.
 - **No disco interno do Mac, pula o que não é seu:** as pastas do sistema, os dados internos de outros apps (`Library/Containers` e `Group Containers`) e o miolo das bibliotecas de Fotos, Música e TV (cada biblioteca aparece como um item só). Assim o macOS não fica pedindo autorização pasta por pasta.
 
 ## Baixar e instalar (Mac)
@@ -61,6 +61,10 @@ Pronto: nas próximas vezes ele abre normalmente.
 1. Na pasta Aplicativos, **clique com o botão direito** (ou Control + clique) no HD Fantasma e escolha **Abrir**.
 2. No aviso, clique em **Abrir** de novo.
 
+## Baixar e instalar (Windows, em teste)
+
+A versão de Windows está em teste (beta), com as mesmas funções. Na página de [Releases](https://github.com/otavioclima-hub/hd-fantasma/releases), baixe o **`HD-Fantasma-…-windows-x64-setup.exe`** da versão marcada *Pre-release* e dê dois cliques. No aviso "O Windows protegeu o computador", clique em **Mais informações** → **Executar assim mesmo** (o app não é assinado pela Microsoft). Guia completo e lista do que testar: **[docs/WINDOWS.md](docs/WINDOWS.md)**.
+
 ## Primeiro uso
 
 1. Plugue um disco (HD, SSD, pen drive, cartão) e clique em **Ler disco**, no topo do app.
@@ -71,7 +75,7 @@ Pronto: nas próximas vezes ele abre normalmente.
 
 ## Onde fica o catálogo
 
-No seu Mac, em **Documentos → HD Fantasma → `catalogo.sqlite`**. É um arquivo só. Para fazer cópia de segurança, copie esse arquivo.
+No Mac, em **Documentos → HD Fantasma → `catalogo.sqlite`**. No Windows, em `%LOCALAPPDATA%\HD Fantasma\catalogo.sqlite` (fora de Documentos, porque lá costuma ser o OneDrive). É um arquivo só. Para fazer cópia de segurança, copie esse arquivo.
 
 Ele é pequeno: um HD de vídeos com alguns milhares de arquivos ocupa poucos MB; o disco interno inteiro de um Mac (quase 3 milhões de arquivos) fica em torno de 500 MB. Parado, o app usa cerca de 30 MB de memória.
 
@@ -96,7 +100,7 @@ xattr -dr com.apple.quarantine "/Applications/HD Fantasma.app"
 ```
 
 **Tem para Windows?**
-Em breve. O Mac vem primeiro.
+Sim, em teste (beta): veja [docs/WINDOWS.md](docs/WINDOWS.md).
 
 **Meu HD foi formatado no Mac e quero ler no Windows.**
 O Windows não entende o formato do Mac sozinho. Existem programas que ensinam isso ao Windows, como o Paragon APFS/HFS+ for Windows. Se o Windows enxergar o disco, o HD Fantasma também lê.
@@ -131,6 +135,7 @@ Ele continua no catálogo, marcado como ausente. Dá para navegar e pesquisar ne
 
   Ele compila o MCP (`scripts/build-mcp-sidecar.sh --universal`), roda `npm run tauri build -- --target universal-apple-darwin --bundles app,dmg`, confere que o `.app` tem os dois programas em formato universal e deixa **só o `.dmg`** em `instalador/` (nenhum `.app` fica na pasta do projeto). Com um certificado local chamado "HD Fantasma Local" nas Chaves, assina com ele, e o macOS mantém o Acesso Total ao Disco entre uma versão e outra.
 - **Instalar no próprio Mac** a partir desse `.dmg` (vai para Aplicativos e confere que ficou idêntico): `scripts/install-mac.sh`.
+- **Windows:** o GitHub Actions (`.github/workflows/windows.yml`) roda os testes e gera o instalador num Windows de verdade a cada envio. Veja [docs/WINDOWS.md](docs/WINDOWS.md).
 - **Licenças de terceiros:** `python3 scripts/gen-third-party-licenses.py` refaz o `THIRD_PARTY_LICENSES.md`.
 - **Decisões do projeto:** [`docs/adr/`](docs/adr/). **Vocabulário:** [`CONTEXT.md`](CONTEXT.md). **Plano:** [`PLANO.md`](PLANO.md).
 

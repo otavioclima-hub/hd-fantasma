@@ -1,6 +1,6 @@
 [package]
 name = "hd-fantasma"
-version = "0.2.0"
+version = "0.3.0"
 description = "HD Fantasma — disk catalog"
 authors = ["Otavio Lima"]
 license = "MIT"
@@ -13,7 +13,8 @@ edition = "2024"
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "hd_fantasma_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Desktop only: the app binary links this as a normal Rust library (no mobile build).
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

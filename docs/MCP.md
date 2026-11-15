@@ -21,7 +21,7 @@ O que dá para fazer:
 - **Sem internet.** O programa só conversa com o Claude dentro do seu próprio Mac (ADR 0015). Ele não tem como se conectar à rede.
 - **Não abre seus arquivos.** Só lê nome, tamanho, data e a estrutura de pastas (ADR 0013).
 - **Não escreve no disco.** `catalogar_disco` só lê o disco e grava no catálogo. Só aceita um disco inteiro que esteja plugado, nunca uma pasta qualquer.
-- **O catálogo fica no Mac** em `Documentos/HD Fantasma/catalogo.sqlite`. O app pode estar aberto ao mesmo tempo.
+- **O catálogo fica no computador**: no Mac em `Documentos/HD Fantasma/catalogo.sqlite`, no Windows em `%LOCALAPPDATA%\HD Fantasma\catalogo.sqlite`. O app pode estar aberto ao mesmo tempo.
 - Observação: a conversa com o Claude em si passa pela internet (isso é do Claude, não do HD Fantasma). Os resultados das buscas (nomes e caminhos de arquivos) viram parte da conversa.
 
 ## Antes de começar
@@ -64,6 +64,19 @@ claude mcp add hd-fantasma -- "/Applications/HD Fantasma.app/Contents/MacOS/hd-f
 ```
 
 Para conferir: `claude mcp list` deve mostrar `hd-fantasma`.
+
+## No Windows
+
+O botão **Conectar ao Claude** faz tudo sozinho também. O programa do MCP fica em
+`%LOCALAPPDATA%\HD Fantasma\hd-fantasma-mcp.exe`, e a configuração do Claude Desktop em
+`%APPDATA%\Claude\claude_desktop_config.json` (na versão da Microsoft Store, dentro de
+`%LOCALAPPDATA%\Packages\Claude_…\LocalCache\Roaming\Claude\`). No Claude Code, pelo PowerShell:
+
+```
+claude mcp add --scope user hd-fantasma "$env:LOCALAPPDATA\HD Fantasma\hd-fantasma-mcp.exe"
+```
+
+Para ler um disco pelo Claude, informe a letra: "catalogue o disco E:".
 
 ## Perguntas para fazer
 

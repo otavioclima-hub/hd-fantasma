@@ -33,7 +33,7 @@ If you work with video, photo, audio or design, you probably have a drawer full 
 - **Never opens your files.** It only reads what the system reports: name, size, dates and folders. It does not look inside videos, photos or .zip files.
 - **Never uses the internet.** It sends nothing to anyone, has no account and does not check for updates by itself.
 - **Never writes to your disks.** It only reads. The catalog stays on your computer.
-- **Cloud folders (Google Drive, Dropbox, iCloud):** only what is already downloaded on the Mac is cataloged. It never downloads anything from the cloud.
+- **Cloud folders (Google Drive, Dropbox, iCloud, OneDrive):** only what is already downloaded on the computer is cataloged. It never downloads anything from the cloud.
 - **On the Mac's internal disk, it skips what isn't yours:** system folders, other apps' private data (`Library/Containers` and `Group Containers`) and the inside of Photos, Music and TV libraries (each library shows as a single item). That way macOS doesn't ask for permission folder by folder.
 
 ## Download and install (Mac)
@@ -61,6 +61,10 @@ From then on it opens normally.
 1. In Applications, **right-click** (or Control-click) HD Fantasma and choose **Open**.
 2. In the warning, click **Open** again.
 
+## Download and install (Windows, in testing)
+
+The Windows version is in testing (beta), with the same features. On the [Releases](https://github.com/otavioclima-hub/hd-fantasma/releases) page, download **`HD-Fantasma-…-windows-x64-setup.exe`** from the version marked *Pre-release* and double-click it. At "Windows protected your PC", click **More info** → **Run anyway** (the app is not signed by Microsoft). Full guide and test checklist (in Portuguese): **[docs/WINDOWS.md](docs/WINDOWS.md)**.
+
 ## First use
 
 1. Plug in a drive (HD, SSD, USB stick, card) and click **Read disk** at the top of the app.
@@ -71,7 +75,7 @@ From then on it opens normally.
 
 ## Where the catalog lives
 
-On your Mac, at **Documents → HD Fantasma → `catalogo.sqlite`**. It is a single file; to back it up, copy that file.
+On the Mac, at **Documents → HD Fantasma → `catalogo.sqlite`**. On Windows, at `%LOCALAPPDATA%\HD Fantasma\catalogo.sqlite` (not in Documents, which is often inside OneDrive there). It is a single file; to back it up, copy that file.
 
 It is small: a video drive with a few thousand files takes a few MB; a Mac's whole internal disk (almost 3 million files) is about 500 MB. When idle, the app uses about 30 MB of memory.
 
@@ -96,7 +100,7 @@ xattr -dr com.apple.quarantine "/Applications/HD Fantasma.app"
 ```
 
 **Is there a Windows version?**
-Coming soon. Mac comes first.
+Yes, in testing (beta): see [docs/WINDOWS.md](docs/WINDOWS.md).
 
 **My drive is formatted for Mac and I want to read it on Windows.**
 Windows cannot read Mac formats by itself. Tools such as Paragon APFS/HFS+ for Windows add that. If Windows can see the disk, HD Fantasma can read it.

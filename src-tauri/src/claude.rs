@@ -174,6 +174,8 @@ fn write_new_then_rename(dir: &Path, like: &Path, bytes: &[u8], dest: &Path) -> 
             let mode = std::fs::metadata(like).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
             f.set_permissions(std::fs::Permissions::from_mode(mode))?;
         }
+        #[cfg(not(unix))]
+        let _ = like; // Windows: the new file inherits the folder's protection (the user's profile).
         f.write_all(bytes)?;
         f.sync_all()?;
         std::fs::rename(&tmp, dest)

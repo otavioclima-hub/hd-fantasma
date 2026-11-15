@@ -21,7 +21,7 @@ Decisões tomadas com o Otavio em 2026-11-14 (4 rodadas de perguntas). O porquê
 ## Ordem
 
 1. Mac (Apple Silicon + Intel).
-2. Windows — build pelo GitHub Actions, teste feito por um parceiro.
+2. Windows — build pelo GitHub Actions, teste feito por um parceiro (código pronto em 2026-11-15, ADR 0019; guia em `docs/WINDOWS.md`).
 3. MCP.
 
 Repo `otavioclima-hub/hd-fantasma`, privado até o Mac ficar bom, depois público. Licença MIT, autor Otavio Lima. Ícone em vetor feito pelo Claude.
