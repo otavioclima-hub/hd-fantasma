@@ -23,3 +23,6 @@ vite.config.ts.timestamp-*
 
 # Notas e memória do Claude (dados pessoais, ficam só no computador)
 /memoria
+
+# Rascunhos de divulgação (ficam só no computador)
+/docs/divulgacao
